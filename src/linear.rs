@@ -74,6 +74,14 @@ impl Mul<Scalar> for Matrix {
         Self(self.0.map(|vector| vector * rhs))
     }
 }
+impl Mul<Matrix> for Scalar {
+    type Output = Matrix;
+
+    fn mul(self, rhs: Matrix) -> Self::Output {
+        // Multiplication with a matrix is commutative.
+        rhs * self
+    }
+}
 
 impl Vector {
     pub const fn new(r0: Scalar, r1: Scalar, r2: Scalar, r3: Scalar) -> Self {

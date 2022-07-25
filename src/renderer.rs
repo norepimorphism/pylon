@@ -16,6 +16,7 @@ pub enum Error {
 /// Pylon's 3D renderer.
 #[derive(Debug)]
 pub struct Renderer {
+    bind_group: BindGroup,
     device: Device,
     queue: Queue,
     surface: Surface,
@@ -48,9 +49,21 @@ impl Renderer {
         }
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
-        let pipeline = Self::create_pipeline(&device);
+        let bind_group_layout = Self::create_bind_group_layout(&device);
+        let pipeline = Self::create_pipeline(&device, &bind_group_layout);
+        let bind_group = Self::create_bind_group(&device, &bind_group_layout);
+
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: todo!(),
+            size: todo!(),
+            usage: BufferUsages::UNIFORM | BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+
+        buffer.slice(..).get_mapped_range_mut();
 
         let mut this = Self {
+            bind_group,
             device,
             queue,
             surface,
@@ -97,6 +110,22 @@ impl Renderer {
         .await
         .map_err(|_| Error::NoCompatibleDeviceFound)
     }
+
+    fn create_bind_group_layout(device: &Device) -> BindGroupLayout {
+        device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        })
+    }
 }
 
 macro_rules! create_shader_module {
@@ -106,10 +135,17 @@ macro_rules! create_shader_module {
 }
 
 impl Renderer {
-    fn create_pipeline(device: &Device) -> RenderPipeline {
+    fn create_pipeline(
+        device: &Device,
+        bind_group_layout: &BindGroupLayout,
+    ) -> RenderPipeline {
         device.create_render_pipeline(&RenderPipelineDescriptor {
             label: None,
-            layout: None,
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[bind_group_layout],
+                push_constant_ranges: &[],
+            })),
             vertex: VertexState {
                 module: &create_shader_module!(device, "shaders/vertex.wgsl"),
                 entry_point: "main",
@@ -139,6 +175,19 @@ impl Renderer {
         })
     }
 
+    fn create_bind_group(device: &Device, layout: &BindGroupLayout) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                // BindGroupEntry {
+                //     binding: 0,
+                //     resource: BindingResource::BufferArray(()),
+                // },
+            ],
+        })
+    }
+
     pub fn resize_surface(&mut self, width: u32, height: u32) {
         self.surface.configure(
             &self.device,
@@ -163,6 +212,7 @@ impl Renderer {
         {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
             for (i, object) in scene.objects.iter().enumerate() {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 

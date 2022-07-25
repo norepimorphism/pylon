@@ -82,7 +82,7 @@ impl From<Vector> for Point {
 /// coordinates by; rather, the coordinates of a `Point` shall be interpreted by context. For
 /// example, in the context of clip space, all coordinates within a `Point` must lie between -1 and
 /// 1.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     /// The X coordinate.
     pub x: f32,
@@ -123,12 +123,21 @@ pub struct Object {
 
 impl Object {
     pub fn world_matrix(&self) -> Matrix {
-        self.position_matrix() * self.scale_matrix()
+        let mut matrix = Matrix::IDENTITY;
+
+        if self.position != Point::ORIGIN {
+            // matrix *= self.position_matrix();
+        }
+        if self.scale != 1. {
+            // matrix *= self.scale_matrix();
+        }
+
+        matrix
     }
 
     /// A transformation matrix for translating this object's mesh according to [`Self::position`].
     pub fn position_matrix(&self) -> Matrix {
-
+        todo!()
     }
 
     /// A transformation matrix for scaling this object's mesh according to [`Self::scale`].
