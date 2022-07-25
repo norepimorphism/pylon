@@ -1,0 +1,16 @@
+[package]
+name = "pylon-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = "1.0"
+raw-window-handle = "0.4"
+tobj = "3.2"
+tracing = "0.1"
+wgpu = "0.13"
+
+[dev-dependencies]
+minifb = "0.23"
+pollster = "0.2"
+tracing-subscriber = "0.3"
