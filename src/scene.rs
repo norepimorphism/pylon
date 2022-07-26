@@ -39,8 +39,6 @@
 //! the range `[-1, 1]` in all axes. During rasterization, clip space is compressed into a 2D
 //! viewport.
 
-use crate::{Matrix, Vector};
-
 /// The integral type for indexing a mesh's [vertex pool](Mesh::vertex_pool).
 pub type MeshVertexIndex = u32;
 
@@ -68,14 +66,6 @@ pub struct Camera {
     pub roll: f32,
 }
 
-impl From<Vector> for Point {
-    fn from(v: Vector) -> Self {
-        let [x, y, z, _] = v.to_array();
-
-        Self { x, y, z }
-    }
-}
-
 /// A singular location within a coordinate space.
 ///
 /// The `Point` type definition does not prescribe a particular coordinate space to constrain its
@@ -100,12 +90,6 @@ impl Point {
     pub const ORIGIN: Self = Self { x: 0., y: 0., z: 0. };
 }
 
-impl From<Point> for Vector {
-    fn from(p: Point) -> Self {
-        Self::new(p.x, p.y, p.z, 0.)
-    }
-}
-
 /// A [mesh](Mesh), with a [material](Material) applied, within a scene.
 #[derive(Clone, Debug)]
 pub struct Object {
@@ -119,31 +103,6 @@ pub struct Object {
     pub mesh: Mesh,
     /// The material applied to [the mesh](Self::mesh).
     pub material: Material,
-}
-
-impl Object {
-    pub fn world_matrix(&self) -> Matrix {
-        let mut matrix = Matrix::IDENTITY;
-
-        if self.position != Point::ORIGIN {
-            // matrix *= self.position_matrix();
-        }
-        if self.scale != 1. {
-            // matrix *= self.scale_matrix();
-        }
-
-        matrix
-    }
-
-    /// A transformation matrix for translating this object's mesh according to [`Self::position`].
-    pub fn position_matrix(&self) -> Matrix {
-        todo!()
-    }
-
-    /// A transformation matrix for scaling this object's mesh according to [`Self::scale`].
-    pub fn scale_matrix(&self) -> Matrix {
-        self.scale * Matrix::IDENTITY
-    }
 }
 
 #[derive(Clone, Debug)]

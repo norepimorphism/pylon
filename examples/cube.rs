@@ -35,10 +35,14 @@ fn main() {
     })
     .unwrap();
 
-    let scene = scene();
+    let mut scene = scene();
     loop {
         window.update();
         gfx.render(&scene);
+
+        let cube = scene.objects.first_mut().unwrap();
+        cube.scale += 0.001;
+
         thread::sleep(Duration::from_millis(10));
     }
 }
