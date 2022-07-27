@@ -74,6 +74,13 @@ pub struct Camera {
     pub roll: f32,
 }
 
+impl Camera {
+    fn transformation_matrix(&self) -> Matrix {
+        // TODO
+        Matrix::IDENTITY
+    }
+}
+
 impl From<Vector> for Point {
     fn from(v: Vector) -> Self {
         let [x, y, z, _] = v.to_array();

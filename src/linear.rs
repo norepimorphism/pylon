@@ -49,6 +49,10 @@ impl Matrix {
         0., 0., 1., 0.,
         0., 0., 0., 1.,
     );
+
+    pub fn to_array(&self) -> [[Scalar; 4]; 4] {
+        self.0.map(|v| v.to_array())
+    }
 }
 
 impl Add<Self> for Matrix {
@@ -91,6 +95,7 @@ impl Vector {
 }
 
 /// A 4x1 column matrix of `Scalar`s.
+#[derive(Clone, Copy)]
 pub struct Vector(Simd<Scalar, 4>);
 
 impl Vector {

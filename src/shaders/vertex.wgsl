@@ -53,7 +53,7 @@ fn object_position_matrix() -> mat4x4<f32> {
 ///
 /// This is the product of all object transformation matrices.
 fn object_transformation_matrix() -> mat4x4<f32> {
-    return scale_matrix() * position_matrix();
+    return object_scale_matrix() * object_position_matrix();
 }
 
 /// The transformation matrix to be applied to the current vertex.

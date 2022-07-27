@@ -7,7 +7,7 @@ fn main() {
     const HEIGHT: usize = 512;
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .without_time()
         .init();
@@ -36,13 +36,15 @@ fn main() {
     .unwrap();
 
     let mut scene = scene();
+    let mut tick_count: f32 = 0.;
     loop {
         window.update();
         gfx.render(&scene);
 
         let cube = scene.objects.first_mut().unwrap();
-        cube.scale += 0.001;
+        cube.scale = 1.0 + ((tick_count / 10.0).sin() + 1.0) / 4.0;
 
+        tick_count += 1.0;
         thread::sleep(Duration::from_millis(10));
     }
 }

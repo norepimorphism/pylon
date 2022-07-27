@@ -3,7 +3,7 @@
 use raw_window_handle::HasRawWindowHandle;
 use wgpu::{*, util::DeviceExt as _};
 
-use crate::{Camera, MeshVertex, Object, Point, Scene};
+use crate::{MeshVertex, Object, Point, Scene};
 
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
@@ -16,18 +16,35 @@ pub enum Error {
 /// Pylon's 3D renderer.
 #[derive(Debug)]
 pub struct Renderer {
-    bind_group_layouts: BindGroupLayouts,
     device: Device,
+    pipeline: RenderPipeline,
     queue: Queue,
     surface: Surface,
-    pipeline: RenderPipeline,
+    uniforms: Uniforms,
 }
 
 #[derive(Debug)]
-struct BindGroupLayouts {
-    object_transforms: BindGroupLayout,
-    camera: BindGroupLayout,
+struct Uniforms {
+    object_transforms: Uniform,
+    camera: Uniform,
 }
+
+#[derive(Debug)]
+struct Uniform {
+    buffer: Buffer,
+    bind_group: BindGroup,
+    bind_group_layout: BindGroupLayout,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct ObjectTransforms {
+    position: Point,
+    scale: f32,
+}
+
+unsafe impl bytemuck::Pod for ObjectTransforms {}
+unsafe impl bytemuck::Zeroable for ObjectTransforms {}
 
 impl Renderer {
     /// Creates a new `Renderer`.
@@ -55,15 +72,15 @@ impl Renderer {
         }
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
-        let bind_group_layouts = Self::create_bind_group_layouts(&device);
-        let pipeline = Self::create_pipeline(&device, &bind_group_layout);
+        let uniforms = Self::create_uniforms(&device);
+        let pipeline = Self::create_pipeline(&device, &uniforms);
 
         let mut this = Self {
-            bind_group_layouts,
             device,
+            pipeline,
             queue,
             surface,
-            pipeline,
+            uniforms,
         };
         this.resize_surface(surface_width, surface_height);
 
@@ -107,7 +124,44 @@ impl Renderer {
         .map_err(|_| Error::NoCompatibleDeviceFound)
     }
 
-    fn create_bind_group_layout(device: &Device) -> BindGroupLayout {
+    fn create_uniforms(device: &Device) -> Uniforms {
+        Uniforms {
+            object_transforms: Self::create_uniform(
+                device,
+                std::mem::size_of::<ObjectTransforms>(),
+            ),
+            camera: Self::create_uniform(
+                device,
+                std::mem::size_of::<[[f32; 4]; 4]>(),
+            ),
+        }
+    }
+
+    fn create_uniform(device: &Device, size: usize) -> Uniform {
+        let buffer = Self::create_uniform_buffer(device, size);
+        let bind_group_layout = Self::create_uniform_bind_group_layout(device);
+
+        Uniform {
+            bind_group: Self::create_uniform_bind_group(
+                device,
+                &bind_group_layout,
+                &buffer,
+            ),
+            buffer,
+            bind_group_layout,
+        }
+    }
+
+    fn create_uniform_buffer(device: &Device, size: usize) -> Buffer {
+        device.create_buffer(&BufferDescriptor {
+            label: None,
+            size: size as BufferAddress,
+            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn create_uniform_bind_group_layout(device: &Device) -> BindGroupLayout {
         device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
             entries: &[BindGroupLayoutEntry {
@@ -122,6 +176,21 @@ impl Renderer {
             }],
         })
     }
+
+    fn create_uniform_bind_group(
+        device: &Device,
+        layout: &BindGroupLayout,
+        buffer: &Buffer,
+    ) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            }],
+        })
+    }
 }
 
 macro_rules! create_shader_module {
@@ -133,13 +202,16 @@ macro_rules! create_shader_module {
 impl Renderer {
     fn create_pipeline(
         device: &Device,
-        bind_group_layout: &BindGroupLayout,
+        uniforms: &Uniforms,
     ) -> RenderPipeline {
         device.create_render_pipeline(&RenderPipelineDescriptor {
             label: None,
             layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[bind_group_layout],
+                bind_group_layouts: &[
+                    &uniforms.camera.bind_group_layout,
+                    &uniforms.object_transforms.bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             })),
             vertex: VertexState {
@@ -194,18 +266,32 @@ impl Renderer {
             .iter()
             .map(|object| self.create_object_resources(object))
             .collect();
-        let camera_resources = self.create_camera_resources(&scene.camera);
+        self.queue.write_buffer(
+            &self.uniforms.camera.buffer,
+            0,
+            bytemuck::bytes_of(&scene.camera.transformation_matrix().to_array()),
+        );
 
         let mut encoder = self.create_command_encoder();
         {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &camera_resources.bind_group, &[]);
+            pass.set_bind_group(0, &self.uniforms.camera.bind_group, &[]);
             for (i, object) in scene.objects.iter().enumerate() {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 
+                self.queue.write_buffer(
+                    &self.uniforms.object_transforms.buffer,
+                    0,
+                    bytemuck::bytes_of(&self.create_object_transforms(object)),
+                );
+
                 let object_resources = &object_resources[i];
-                pass.set_bind_group(1, &object_resources.transforms.bind_group, &[]);
+                pass.set_bind_group(
+                    1,
+                    &self.uniforms.object_transforms.bind_group,
+                    &[],
+                );
                 pass.set_vertex_buffer(
                     0,
                     object_resources.vertex_buffer.slice(..),
@@ -217,8 +303,6 @@ impl Renderer {
 
                 let index_count = (3 * object.mesh.triangles.len()) as u32;
                 pass.draw_indexed(0..index_count, 0, 0..1);
-
-                object_resources.transforms.buffer.destroy();
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -241,30 +325,13 @@ impl Renderer {
 }
 
 struct ObjectResources {
-    transforms: ObjectTransformsResources,
     index_buffer: Buffer,
     vertex_buffer: Buffer,
 }
 
-struct ObjectTransformsResources {
-    buffer: Buffer,
-    bind_group: BindGroup,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug)]
-struct ObjectTransforms {
-    position: Point,
-    scale: f32,
-}
-
-unsafe impl bytemuck::Pod for ObjectTransforms {}
-unsafe impl bytemuck::Zeroable for ObjectTransforms {}
-
 impl Renderer {
     fn create_object_resources(&self, object: &Object) -> ObjectResources {
         ObjectResources {
-            transforms: self.create_object_transforms_resources(object),
             index_buffer: self.create_buffer(
                 &object.mesh.triangles,
                 BufferUsages::INDEX,
@@ -276,44 +343,6 @@ impl Renderer {
         }
     }
 
-    fn create_object_transforms_resources(
-        &self,
-        object: &Object,
-    ) -> ObjectTransformsResources {
-        let buffer = self.create_object_transforms_buffer(object);
-
-        ObjectTransformsResources {
-            bind_group: self.create_object_transforms_bind_group(&buffer),
-            buffer,
-        }
-    }
-
-    fn create_object_transforms_buffer(&self, object: &Object) -> Buffer {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::bytes_of(&self.create_object_transforms(object)),
-            usage: BufferUsages::UNIFORM,
-        })
-    }
-
-    fn create_object_transforms(&self, object: &Object) -> ObjectTransforms {
-        ObjectTransforms {
-            position: object.position,
-            scale: object.scale,
-        }
-    }
-
-    fn create_object_transforms_bind_group(&self, buffer: &Buffer) -> BindGroup {
-        self.device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &self.bind_group_layouts.object_transforms,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
-            }],
-        })
-    }
-
     fn create_buffer<T>(&self, slice: &[T], usage: BufferUsages) -> Buffer
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
@@ -322,41 +351,6 @@ impl Renderer {
             label: None,
             contents: bytemuck::cast_slice(slice),
             usage,
-        })
-    }
-}
-
-struct CameraResources {
-    buffer: Buffer,
-    bind_group: BindGroup,
-}
-
-impl Renderer {
-    fn create_camera_resources(&self, camera: &Camera) -> CameraResources {
-        let buffer = self.create_camera_buffer();
-
-        CameraResources {
-            bind_group: self.create_camera_bind_group(camera, &buffer),
-            buffer,
-        }
-    }
-
-    fn create_camera_buffer(&self) -> Buffer {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: None,
-            contents: todo!(),
-            usage: BufferUsages::UNIFORM,
-        })
-    }
-
-    fn create_camera_bind_group(&self, camera: &Camera, buffer: &Buffer) -> BindGroup {
-        self.device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: self.bind_group_layouts.camera,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
-            }],
         })
     }
 
@@ -379,5 +373,12 @@ impl Renderer {
             })],
             ..Default::default()
         })
+    }
+
+    fn create_object_transforms(&self, object: &Object) -> ObjectTransforms {
+        ObjectTransforms {
+            position: object.position,
+            scale: object.scale,
+        }
     }
 }
