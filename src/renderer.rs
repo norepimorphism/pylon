@@ -3,7 +3,7 @@
 use raw_window_handle::HasRawWindowHandle;
 use wgpu::{*, util::DeviceExt as _};
 
-use crate::{MeshVertex, Object, Point, Scene};
+use crate::{Camera, MeshVertex, Object, Point, Scene};
 
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
@@ -16,11 +16,17 @@ pub enum Error {
 /// Pylon's 3D renderer.
 #[derive(Debug)]
 pub struct Renderer {
-    bind_group_layout: BindGroupLayout,
+    bind_group_layouts: BindGroupLayouts,
     device: Device,
     queue: Queue,
     surface: Surface,
     pipeline: RenderPipeline,
+}
+
+#[derive(Debug)]
+struct BindGroupLayouts {
+    object_transforms: BindGroupLayout,
+    camera: BindGroupLayout,
 }
 
 impl Renderer {
@@ -49,11 +55,11 @@ impl Renderer {
         }
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
-        let bind_group_layout = Self::create_bind_group_layout(&device);
+        let bind_group_layouts = Self::create_bind_group_layouts(&device);
         let pipeline = Self::create_pipeline(&device, &bind_group_layout);
 
         let mut this = Self {
-            bind_group_layout,
+            bind_group_layouts,
             device,
             queue,
             surface,
@@ -183,32 +189,36 @@ impl Renderer {
 
         let frame = self.surface.get_current_texture().unwrap();
         let frame_view = Self::create_texture_view(&frame.texture);
-        let resources: Vec<ObjectResources> = scene
+        let object_resources: Vec<ObjectResources> = scene
             .objects
             .iter()
             .map(|object| self.create_object_resources(object))
             .collect();
+        let camera_resources = self.create_camera_resources(&scene.camera);
 
         let mut encoder = self.create_command_encoder();
         {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &camera_resources.bind_group, &[]);
             for (i, object) in scene.objects.iter().enumerate() {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 
-                let resources = &resources[i];
-                pass.set_bind_group(0, &resources.bind_group, &[]);
+                let object_resources = &object_resources[i];
+                pass.set_bind_group(1, &object_resources.transforms.bind_group, &[]);
                 pass.set_vertex_buffer(
                     0,
-                    resources.vertex_buffer.slice(..),
+                    object_resources.vertex_buffer.slice(..),
                 );
                 pass.set_index_buffer(
-                    resources.index_buffer.slice(..),
+                    object_resources.index_buffer.slice(..),
                     IndexFormat::Uint32,
                 );
 
                 let index_count = (3 * object.mesh.triangles.len()) as u32;
                 pass.draw_indexed(0..index_count, 0, 0..1);
+
+                object_resources.transforms.buffer.destroy();
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -226,6 +236,127 @@ impl Renderer {
             mip_level_count: None,
             base_array_layer: 0,
             array_layer_count: None,
+        })
+    }
+}
+
+struct ObjectResources {
+    transforms: ObjectTransformsResources,
+    index_buffer: Buffer,
+    vertex_buffer: Buffer,
+}
+
+struct ObjectTransformsResources {
+    buffer: Buffer,
+    bind_group: BindGroup,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct ObjectTransforms {
+    position: Point,
+    scale: f32,
+}
+
+unsafe impl bytemuck::Pod for ObjectTransforms {}
+unsafe impl bytemuck::Zeroable for ObjectTransforms {}
+
+impl Renderer {
+    fn create_object_resources(&self, object: &Object) -> ObjectResources {
+        ObjectResources {
+            transforms: self.create_object_transforms_resources(object),
+            index_buffer: self.create_buffer(
+                &object.mesh.triangles,
+                BufferUsages::INDEX,
+            ),
+            vertex_buffer: self.create_buffer(
+                &object.mesh.vertex_pool,
+                BufferUsages::VERTEX,
+            ),
+        }
+    }
+
+    fn create_object_transforms_resources(
+        &self,
+        object: &Object,
+    ) -> ObjectTransformsResources {
+        let buffer = self.create_object_transforms_buffer(object);
+
+        ObjectTransformsResources {
+            bind_group: self.create_object_transforms_bind_group(&buffer),
+            buffer,
+        }
+    }
+
+    fn create_object_transforms_buffer(&self, object: &Object) -> Buffer {
+        self.device.create_buffer_init(&util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&self.create_object_transforms(object)),
+            usage: BufferUsages::UNIFORM,
+        })
+    }
+
+    fn create_object_transforms(&self, object: &Object) -> ObjectTransforms {
+        ObjectTransforms {
+            position: object.position,
+            scale: object.scale,
+        }
+    }
+
+    fn create_object_transforms_bind_group(&self, buffer: &Buffer) -> BindGroup {
+        self.device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &self.bind_group_layouts.object_transforms,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            }],
+        })
+    }
+
+    fn create_buffer<T>(&self, slice: &[T], usage: BufferUsages) -> Buffer
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        self.device.create_buffer_init(&util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(slice),
+            usage,
+        })
+    }
+}
+
+struct CameraResources {
+    buffer: Buffer,
+    bind_group: BindGroup,
+}
+
+impl Renderer {
+    fn create_camera_resources(&self, camera: &Camera) -> CameraResources {
+        let buffer = self.create_camera_buffer();
+
+        CameraResources {
+            bind_group: self.create_camera_bind_group(camera, &buffer),
+            buffer,
+        }
+    }
+
+    fn create_camera_buffer(&self) -> Buffer {
+        self.device.create_buffer_init(&util::BufferInitDescriptor {
+            label: None,
+            contents: todo!(),
+            usage: BufferUsages::UNIFORM,
+        })
+    }
+
+    fn create_camera_bind_group(&self, camera: &Camera, buffer: &Buffer) -> BindGroup {
+        self.device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: self.bind_group_layouts.camera,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            }],
         })
     }
 
@@ -249,72 +380,4 @@ impl Renderer {
             ..Default::default()
         })
     }
-
-    fn create_object_resources(&self, object: &Object) -> ObjectResources {
-        ObjectResources {
-            bind_group: self.create_world_matrix_bind_group(object),
-            index_buffer: self.create_buffer(
-                &object.mesh.triangles,
-                BufferUsages::INDEX,
-            ),
-            vertex_buffer: self.create_buffer(
-                &object.mesh.vertex_pool,
-                BufferUsages::VERTEX,
-            ),
-        }
-    }
-
-    fn create_world_matrix_bind_group(&self, object: &Object) -> BindGroup {
-        self.device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &self.bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer({
-                    self.device.create_buffer_init(&util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::bytes_of(&self.create_world_matrix_input(object)),
-                        usage: BufferUsages::UNIFORM,
-                    })
-                    .as_entire_buffer_binding()
-                }),
-            }],
-        })
-    }
-
-    fn create_world_matrix_input(&self, object: &Object) -> WorldMatrixInput {
-        WorldMatrixInput {
-            position: object.position,
-            scale: object.scale,
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug)]
-struct WorldMatrixInput {
-    position: Point,
-    scale: f32,
-}
-
-unsafe impl bytemuck::Pod for WorldMatrixInput {}
-unsafe impl bytemuck::Zeroable for WorldMatrixInput {}
-
-impl Renderer {
-    fn create_buffer<T>(&self, slice: &[T], usage: BufferUsages) -> Buffer
-    where
-        T: bytemuck::Pod + bytemuck::Zeroable,
-    {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(slice),
-            usage,
-        })
-    }
-}
-
-struct ObjectResources {
-    bind_group: BindGroup,
-    index_buffer: Buffer,
-    vertex_buffer: Buffer,
 }
