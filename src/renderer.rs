@@ -3,7 +3,7 @@
 use raw_window_handle::HasRawWindowHandle;
 use wgpu::{*, util::DeviceExt as _};
 
-use crate::{Mesh, MeshVertex, Object, Point, Rotation, Scene};
+use crate::{Camera, Mesh, MeshVertex, Object, Point, Rotation};
 
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
@@ -257,15 +257,17 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self, scene: &mut Scene) {
-        tracing::info!("Rendering {} object(s)...", scene.objects.len());
-
+    pub fn render<'a>(
+        &mut self,
+        camera: &Camera,
+        objects: impl Iterator<Item = &'a mut Object>,
+    ) {
         let frame = self.surface.get_current_texture().unwrap();
         let frame_view = Self::create_texture_view(&frame.texture);
         self.queue.write_buffer(
             &self.uniforms.camera.buffer,
             0,
-            bytemuck::bytes_of(&scene.camera.transformation_matrix().to_array()),
+            bytemuck::bytes_of(&camera.transformation_matrix().to_array()),
         );
 
         let mut encoder = self.create_command_encoder();
@@ -273,7 +275,7 @@ impl Renderer {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.uniforms.camera.bind_group, &[]);
-            for object in scene.objects.iter_mut() {
+            for object in objects {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 
                 self.queue.write_buffer(

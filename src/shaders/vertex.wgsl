@@ -93,9 +93,14 @@ fn object_rotation_matrix() -> mat4x4<f32> {
 ///
 /// This is applied first.
 fn object_scale_matrix() -> mat4x4<f32> {
-    // Note: this will affect the element at `(3, 3)`.
-    // TODO: is that OK?
-    return object_transforms.scale * identity_matrix();
+    let f = object_transforms.scale;
+
+    return mat4x4(
+         f, 0., 0., 0.,
+        0.,  f, 0., 0.,
+        0., 0.,  f, 0.,
+        0., 0., 0., 1.,
+    );
 }
 
 /// The transformation matrix for the position transform of the current object.
@@ -112,7 +117,11 @@ fn object_position_matrix() -> mat4x4<f32> {
 ///
 /// This is the product of all object transformation matrices.
 fn object_transformation_matrix() -> mat4x4<f32> {
-    return object_rotation_matrix() * object_scale_matrix() * object_position_matrix();
+    // Because we're using pre-multiplication, the order here is reversed. The true order is:
+    // 1. Scale.
+    // 2. Rotate.
+    // 3. Translate.
+    return object_position_matrix() * object_rotation_matrix() * object_scale_matrix();
 }
 
 /// The transformation matrix to be applied to the current vertex.
@@ -131,6 +140,7 @@ fn transform_position(position: vec3<f32>) -> vec3<f32> {
 fn main(@location(0) position: vec3<f32>) -> Output {
     var output: Output;
     output.position = vec4<f32>(transform_position(position), 1.0);
+    output.position.y *= -1.0;
 
     return output;
 }

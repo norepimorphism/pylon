@@ -50,17 +50,6 @@ pub use renderer::Renderer;
 /// The integral type for indexing a mesh's [vertex pool](Mesh::vertex_pool).
 pub type MeshVertexIndex = u32;
 
-/// A set of objects and a camera that observes them.
-///
-/// A scene may be rendered with [`Renderer::render`].
-#[derive(Debug)]
-pub struct Scene {
-    /// The camera through which objects are observed.
-    pub camera: Camera,
-    /// The objects.
-    pub objects: Vec<Object>,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     /// The location of this camera in world space.
