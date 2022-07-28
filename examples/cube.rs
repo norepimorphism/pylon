@@ -9,7 +9,6 @@ fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_target(false)
-        .without_time()
         .init();
 
     let mut window = minifb::Window::new(
@@ -39,13 +38,17 @@ fn main() {
     let mut tick_count: f32 = 0.;
     loop {
         window.update();
-        gfx.render(&scene);
+        gfx.render(&mut scene);
 
         let cube = scene.objects.first_mut().unwrap();
-        cube.scale = 1.0 + ((tick_count / 10.0).sin() + 1.0) / 4.0;
+        cube.position_mut().x = (tick_count / 100.0).cos() / 10.0;
+        cube.position_mut().y = (tick_count / 100.0).sin() / 10.0;
+        cube.rotation_mut().x += tick_count / 100_000.0;
+        cube.rotation_mut().y += tick_count / 100_000.0;
+        *cube.scale_mut() = 0.5 + ((tick_count / 10.0).sin() + 1.0) / 4.0;
 
         tick_count += 1.0;
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -56,10 +59,12 @@ fn scene() -> Scene {
             target: Point::ORIGIN,
             roll: 1.,
         },
-        objects: vec![Object {
-            position: Point::ORIGIN,
-            scale: 1.,
-            mesh: Mesh {
+        objects: vec![Object::new(
+            Point::ORIGIN,
+            Rotation::ZERO,
+            0.5,
+            Material,
+            Mesh {
                 vertex_pool: vec![
                     // 0.
                     MeshVertex {
@@ -123,7 +128,6 @@ fn scene() -> Scene {
                     MeshTriangle::new([3, 5, 7]),
                 ],
             },
-            material: Material,
-        }],
+        )],
     }
 }

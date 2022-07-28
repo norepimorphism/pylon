@@ -53,7 +53,7 @@ pub type MeshVertexIndex = u32;
 /// A set of objects and a camera that observes them.
 ///
 /// A scene may be rendered with [`Renderer::render`].
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Scene {
     /// The camera through which objects are observed.
     pub camera: Camera,
@@ -95,6 +95,7 @@ impl From<Vector> for Point {
 /// coordinates by; rather, the coordinates of a `Point` shall be interpreted by context. For
 /// example, in the context of clip space, all coordinates within a `Point` must lie between -1 and
 /// 1.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     /// The X coordinate.
@@ -119,20 +120,106 @@ impl From<Point> for Vector {
     }
 }
 
-/// A [mesh](Mesh), with a [material](Material) applied, within a scene.
-#[derive(Clone, Debug)]
-pub struct Object {
-    /// The position of [the mesh](Self::mesh) in world space.
-    pub position: Point,
-    /// The scale factor of this object's mesh.
+impl Object {
+    /// Creates a new `Object`.
     ///
-    /// A scale factor of 1 represents the original mesh size.
-    pub scale: f32,
-    /// The mesh.
-    pub mesh: Mesh,
-    /// The material applied to [the mesh](Self::mesh).
-    pub material: Material,
+    /// Note that an object's mesh is immutable after creation, so a new object must be created if
+    /// a mesh is to be modified or replaced.
+    ///
+    /// # Arguments
+    ///
+    /// - `position`: the position of `mesh` in world space.
+    /// - `rotation`: the rotation of `mesh`.
+    /// - `scale`: the scale factor of `mesh`. A scale factor of 1 represents the
+    ///   original mesh size.
+    /// - `material`: The material applied to `mesh`.
+    /// - `mesh`: The mesh.
+    pub fn new(
+        position: Point,
+        rotation: Rotation,
+        scale: f32,
+        material: Material,
+        mesh: Mesh,
+    ) -> Self {
+        Self {
+            position,
+            rotation,
+            scale,
+            material,
+            mesh,
+            resources: None,
+        }
+    }
 }
+
+/// A [mesh](Mesh), with a [material](Material) applied, within a scene.
+#[derive(Debug)]
+pub struct Object {
+    position: Point,
+    rotation: Rotation,
+    scale: f32,
+    material: Material,
+    mesh: Mesh,
+    resources: Option<ObjectResources>,
+
+}
+
+impl Object {
+    pub fn position(&self) -> Point {
+        self.position
+    }
+
+    pub fn position_mut(&mut self) -> &mut Point {
+        &mut self.position
+    }
+
+    pub fn rotation(&self) -> Rotation {
+        self.rotation
+    }
+
+    pub fn rotation_mut(&mut self) -> &mut Rotation {
+        &mut self.rotation
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn scale_mut(&mut self) -> &mut f32 {
+        &mut self.scale
+    }
+
+    pub fn material(&self) -> &Material {
+        &self.material
+    }
+
+    pub fn material_mut(&mut self) -> &mut Material {
+        &mut self.material
+    }
+
+    /// The mesh.
+    ///
+    /// As an object's mesh is immutable after creation, there isn't a mutable analogue to this
+    /// method.
+    pub fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Rotation {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Rotation {
+    pub const ZERO: Self = Self { x: 0., y: 0., z: 0. };
+}
+
+#[derive(Clone, Debug)]
+pub struct Material;
 
 #[derive(Clone, Debug)]
 pub struct Mesh {
@@ -142,6 +229,16 @@ pub struct Mesh {
     /// mesh.
     pub triangles: Vec<MeshTriangle>
 }
+
+/// A vertex within a [mesh](Mesh).
+#[derive(Clone, Copy, Debug)]
+pub struct MeshVertex {
+    /// The location of this vertex in mesh space.
+    pub point: Point,
+}
+
+unsafe impl bytemuck::Pod for MeshVertex {}
+unsafe impl bytemuck::Zeroable for MeshVertex {}
 
 impl MeshTriangle {
     /// Creates a new `MeshTriangle` from a triad of vertex indices.
@@ -157,15 +254,15 @@ pub struct MeshTriangle([MeshVertexIndex; 3]);
 unsafe impl bytemuck::Pod for MeshTriangle {}
 unsafe impl bytemuck::Zeroable for MeshTriangle {}
 
-/// A vertex within a [mesh](Mesh).
-#[derive(Clone, Copy, Debug)]
-pub struct MeshVertex {
-    /// The location of this vertex in mesh space.
-    pub point: Point,
+#[derive(Debug)]
+struct ObjectResources {
+    index_buffer: wgpu::Buffer,
+    vertex_buffer: wgpu::Buffer,
 }
 
-unsafe impl bytemuck::Pod for MeshVertex {}
-unsafe impl bytemuck::Zeroable for MeshVertex {}
-
-#[derive(Clone, Debug)]
-pub struct Material;
+impl Drop for ObjectResources {
+    fn drop(&mut self) {
+        self.index_buffer.destroy();
+        self.vertex_buffer.destroy();
+    }
+}

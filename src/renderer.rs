@@ -3,7 +3,7 @@
 use raw_window_handle::HasRawWindowHandle;
 use wgpu::{*, util::DeviceExt as _};
 
-use crate::{MeshVertex, Object, Point, Scene};
+use crate::{Mesh, MeshVertex, Object, Point, Rotation, Scene};
 
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
@@ -36,10 +36,12 @@ struct Uniform {
     bind_group_layout: BindGroupLayout,
 }
 
-#[allow(dead_code)]
+#[repr(C, align(16))]
 #[derive(Clone, Copy, Debug)]
 struct ObjectTransforms {
     position: Point,
+    _0: [u8; 4],
+    rotation: Rotation,
     scale: f32,
 }
 
@@ -115,7 +117,6 @@ impl Renderer {
         adapter.request_device(
             &DeviceDescriptor {
                 limits: adapter.limits(),
-                features: Features::POLYGON_MODE_LINE,
                 ..Default::default()
             },
             None,
@@ -234,7 +235,7 @@ impl Renderer {
             }),
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
-                polygon_mode: PolygonMode::Line,
+                polygon_mode: PolygonMode::Fill,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -256,16 +257,11 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self, scene: &Scene) {
+    pub fn render(&mut self, scene: &mut Scene) {
         tracing::info!("Rendering {} object(s)...", scene.objects.len());
 
         let frame = self.surface.get_current_texture().unwrap();
         let frame_view = Self::create_texture_view(&frame.texture);
-        let object_resources: Vec<ObjectResources> = scene
-            .objects
-            .iter()
-            .map(|object| self.create_object_resources(object))
-            .collect();
         self.queue.write_buffer(
             &self.uniforms.camera.buffer,
             0,
@@ -277,7 +273,7 @@ impl Renderer {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.uniforms.camera.bind_group, &[]);
-            for (i, object) in scene.objects.iter().enumerate() {
+            for object in scene.objects.iter_mut() {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 
                 self.queue.write_buffer(
@@ -286,7 +282,10 @@ impl Renderer {
                     bytemuck::bytes_of(&self.create_object_transforms(object)),
                 );
 
-                let object_resources = &object_resources[i];
+                let mesh = &object.mesh;
+                let object_resources = object
+                    .resources
+                    .get_or_insert_with(|| self.create_object_resources(mesh));
                 pass.set_bind_group(
                     1,
                     &self.uniforms.object_transforms.bind_group,
@@ -322,22 +321,15 @@ impl Renderer {
             array_layer_count: None,
         })
     }
-}
 
-struct ObjectResources {
-    index_buffer: Buffer,
-    vertex_buffer: Buffer,
-}
-
-impl Renderer {
-    fn create_object_resources(&self, object: &Object) -> ObjectResources {
-        ObjectResources {
+    fn create_object_resources(&self, mesh: &Mesh) -> crate::ObjectResources {
+        crate::ObjectResources {
             index_buffer: self.create_buffer(
-                &object.mesh.triangles,
+                &mesh.triangles,
                 BufferUsages::INDEX,
             ),
             vertex_buffer: self.create_buffer(
-                &object.mesh.vertex_pool,
+                &mesh.vertex_pool,
                 BufferUsages::VERTEX,
             ),
         }
@@ -378,6 +370,8 @@ impl Renderer {
     fn create_object_transforms(&self, object: &Object) -> ObjectTransforms {
         ObjectTransforms {
             position: object.position,
+            _0: Default::default(),
+            rotation: object.rotation,
             scale: object.scale,
         }
     }

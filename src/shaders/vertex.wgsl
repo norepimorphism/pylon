@@ -2,6 +2,7 @@
 struct ObjectTransforms {
     /// The position of the object's mesh in world space.
     position: vec3<f32>,
+    rotation: vec3<f32>,
     /// The scale factor of the object's mesh.
     scale: f32,
 }
@@ -32,6 +33,62 @@ fn identity_matrix() -> mat4x4<f32> {
     );
 }
 
+struct SinCos {
+    sin: f32,
+    cos: f32,
+}
+
+fn calc_sin_cos(radians: f32) -> SinCos {
+    var output: SinCos;
+    output.sin = sin(radians);
+    output.cos = cos(radians);
+
+    return output;
+}
+
+fn object_x_rotation_matrix() -> mat4x4<f32> {
+    let sc = calc_sin_cos(object_transforms.rotation.x);
+    let s = sc.sin;
+    let c = sc.cos;
+
+    return mat4x4(
+        1., 0., 0., 0.,
+        0.,  c, -s, 0.,
+        0.,  s,  c, 0.,
+        0., 0., 0., 1.,
+    );
+}
+
+fn object_y_rotation_matrix() -> mat4x4<f32> {
+    let sc = calc_sin_cos(object_transforms.rotation.y);
+    let s = sc.sin;
+    let c = sc.cos;
+
+    return mat4x4(
+         c, 0.,  s, 0.,
+        0., 1., 0., 0.,
+        -s, 0.,  c, 0.,
+        0., 0., 0., 1.,
+    );
+}
+
+fn object_z_rotation_matrix() -> mat4x4<f32> {
+    let sc = calc_sin_cos(object_transforms.rotation.z);
+    let s = sc.sin;
+    let c = sc.cos;
+
+    return mat4x4(
+         c, -s, 0., 0.,
+         s,  c, 0., 0.,
+        0., 0., 1., 0.,
+        0., 0., 0., 1.,
+    );
+}
+
+fn object_rotation_matrix() -> mat4x4<f32> {
+    return object_x_rotation_matrix() * object_y_rotation_matrix() * object_z_rotation_matrix();
+}
+
 /// The transformation matrix for the scale transform of the current object.
 ///
 /// This is applied first.
@@ -45,15 +102,17 @@ fn object_scale_matrix() -> mat4x4<f32> {
 ///
 /// This is applied after the scale matrix.
 fn object_position_matrix() -> mat4x4<f32> {
-    // TODO
-    return identity_matrix();
+    var m = identity_matrix();
+    m[3] += vec4<f32>(object_transforms.position, 0.);
+
+    return m;
 }
 
 /// The transformation matrix for the current object.
 ///
 /// This is the product of all object transformation matrices.
 fn object_transformation_matrix() -> mat4x4<f32> {
-    return object_scale_matrix() * object_position_matrix();
+    return object_rotation_matrix() * object_scale_matrix() * object_position_matrix();
 }
 
 /// The transformation matrix to be applied to the current vertex.
