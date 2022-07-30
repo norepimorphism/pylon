@@ -105,15 +105,12 @@ impl Point {
 
 impl From<Point> for Vector {
     fn from(p: Point) -> Self {
-        Self::new(p.x, p.y, p.z, 0.)
+        Self::new(p.x, p.y, p.z, 1.)
     }
 }
 
 impl Object {
     /// Creates a new `Object`.
-    ///
-    /// Note that an object's mesh is immutable after creation, so a new object must be created if
-    /// a mesh is to be modified or replaced.
     ///
     /// # Arguments
     ///
@@ -186,12 +183,12 @@ impl Object {
         &mut self.material
     }
 
-    /// The mesh.
-    ///
-    /// As an object's mesh is immutable after creation, there isn't a mutable analogue to this
-    /// method.
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
+    }
+
+    pub fn mutate_mesh(&mut self, f: impl FnOnce(&mut Mesh)) {
+        f(&mut self.mesh);
     }
 }
 

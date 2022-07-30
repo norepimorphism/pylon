@@ -252,7 +252,7 @@ impl Renderer {
                 format: SURFACE_FORMAT,
                 width,
                 height,
-                present_mode: PresentMode::Fifo,
+                present_mode: PresentMode::Immediate,
             },
         );
     }
@@ -361,7 +361,7 @@ impl Renderer {
                 view,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Clear(Color::WHITE),
+                    load: LoadOp::Load,
                     store: true,
                 },
             })],

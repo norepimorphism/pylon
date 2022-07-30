@@ -1,76 +1,108 @@
+use fps_counter::FPSCounter;
 use pylon_engine::*;
+use winit::{
+    event::{ElementState, Event, MouseButton, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::{Window, WindowBuilder},
+};
 
-use std::{thread, time::Duration};
-
-const WINDOW_SIZE: usize = 512;
+const WINDOW_SIZE: f64 = 512.0;
 
 fn main() {
     init_tracing();
-    let mut window = create_window();
+    let mut fps_counter = FPSCounter::new();
+    let event_loop = EventLoop::new();
+    let window = create_window(&event_loop);
     let mut gfx = create_gfx(&window);
     let camera = create_camera();
     let mut cube = create_cube();
 
     let mut tick_count: f32 = 0.;
-    let (mut x, mut y) = (0., 0.);
+    let mut mouse_position = Point::ORIGIN;
+    let mut mouse_is_down = false;
+    let mut last_fps = 0;
 
-    loop {
-        // Get mouse position.
-        if let Some([mx, my]) = window
-            .get_mouse_pos(minifb::MouseMode::Discard)
-            .map(|(x, y)| {
-                [x, y].map(|coord| ((coord / 512.0) * 2.0) - 1.0)
-            })
-        {
-            x = mx;
-            y = my;
+    event_loop.run(move |event, _, ctrl_flow| {
+        *ctrl_flow = ControlFlow::Poll;
+
+        match event {
+            Event::WindowEvent { event, .. } => {
+                match event {
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let [x, y] = [position.x, position.y].map(|coord| {
+                            (((coord / WINDOW_SIZE) * 2.0) - 1.0) as f32
+                        });
+                        mouse_position.x = x;
+                        mouse_position.y = y;
+                    }
+                    WindowEvent::MouseInput { button, state, .. } => {
+                        if matches!(button, MouseButton::Left) {
+                            mouse_is_down = match state {
+                                ElementState::Pressed => {
+                                    tracing::info!("FPS: {}", last_fps);
+
+                                    true
+                                }
+                                ElementState::Released => false,
+                            };
+                        }
+                    }
+                    WindowEvent::CloseRequested => {
+                        *ctrl_flow = ControlFlow::Exit;
+                    }
+                    _ => {}
+                }
+            }
+            Event::MainEventsCleared => {
+                window.request_redraw();
+            }
+            Event::RedrawRequested(_) => {
+                // Update cube position.
+                let orbit_angle = tick_count / 10.0;
+                let position = cube.position_mut();
+                position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
+                position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
+
+                // Update cube rotation.
+                let rotation = cube.rotation_mut();
+                rotation.x += tick_count / 10_000.0;
+                rotation.y += tick_count / 10_000.0;
+
+                // Update cube scale.
+                *cube.scale_mut() = if mouse_is_down {
+                    0.1
+                } else {
+                    0.05 + ((tick_count / 10.0).sin() + 1.0) / 50.0
+                };
+
+                gfx.render(&camera, [&mut cube].into_iter());
+
+                tick_count += 1.0;
+                last_fps = fps_counter.tick()
+            }
+            _ => {}
         }
-
-        // Update cube position.
-        let orbit_angle = tick_count / 10.0;
-        let position = cube.position_mut();
-        position.x = x + (orbit_angle.cos() / 10.0);
-        position.y = y + (orbit_angle.sin() / 10.0);
-
-        cube.rotation_mut().x += tick_count / 10_000.0;
-        cube.rotation_mut().y += tick_count / 10_000.0;
-        if window.get_mouse_down(minifb::MouseButton::Left) {
-            *cube.scale_mut() = 0.1;
-        } else {
-            *cube.scale_mut() = 0.05 + ((tick_count / 10.0).sin() + 1.0) / 50.0;
-        }
-
-        tick_count += 1.0;
-        window.update();
-        gfx.render(&camera, [&mut cube].into_iter());
-
-        thread::sleep(Duration::from_millis(5));
-    }
+    });
 }
 
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_target(false)
+        .without_time()
         .init();
 }
 
-fn create_window() -> minifb::Window {
-    minifb::Window::new(
-        "Cube",
-        WINDOW_SIZE,
-        WINDOW_SIZE,
-        minifb::WindowOptions {
-            borderless: false,
-            title: true,
-            resize: false,
-            ..Default::default()
-        },
-    )
-    .unwrap()
+fn create_window(event_loop: &EventLoop<()>) -> Window {
+    WindowBuilder::new()
+        .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_SIZE, WINDOW_SIZE))
+        .with_resizable(false)
+        .with_title("Cube")
+        .build(event_loop)
+        .expect("failed to build window")
 }
 
-fn create_gfx(window: &minifb::Window) -> Renderer {
+fn create_gfx(window: &Window) -> Renderer {
     pollster::block_on(unsafe {
         Renderer::new(
             window,
