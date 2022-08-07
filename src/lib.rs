@@ -2,6 +2,13 @@
 
 //! A small 3D rendering library.
 //!
+//! # Memory Management
+//!
+//! Pylon cannot predict the future&mdash;*yet*&mdash;so it assumes that library consumers know best
+//! about how their objects are created and used and, more importantly, how memory is optimally
+//! managed. As such, memory management is performed externally and interfaced through Pylon via
+//! [`CameraResources`] and [`ObjectResources`].
+//!
 //! # Coordinate Spaces
 //!
 //! There are four coordinate spaces: **mesh** space, **world** space, **camera** space, and
@@ -50,26 +57,6 @@ pub use renderer::Renderer;
 /// The integral type for indexing a mesh's [vertex pool](Mesh::vertex_pool).
 pub type MeshVertexIndex = u32;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Camera {
-    /// The location of this camera in world space.
-    pub position: Point,
-    /// A point, in world space, that this camera is 'looking at'.
-    ///
-    /// This *target point* determines the pitch and yaw of this camera, so-to-speak. This point
-    /// must not be equivalent to [the position](Self::position).
-    pub target: Point,
-    /// The current roll angle in radians.
-    pub roll: f32,
-}
-
-impl Camera {
-    fn transformation_matrix(&self) -> Matrix {
-        // TODO
-        Matrix::IDENTITY
-    }
-}
-
 impl From<Vector> for Point {
     fn from(v: Vector) -> Self {
         let [x, y, z, _] = v.to_array();
@@ -83,7 +70,8 @@ impl From<Vector> for Point {
 /// The `Point` type definition does not prescribe a particular coordinate space to constrain its
 /// coordinates by; rather, the coordinates of a `Point` shall be interpreted by context. For
 /// example, in the context of clip space, all coordinates within a `Point` must lie between -1 and
-/// 1.
+/// 1. It should also be noted that the fields [`x`](Self::x), [`y`](Self::y), and [`z`](Self::z)
+/// are unlimited and may contain arbitrary values.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -94,9 +82,6 @@ pub struct Point {
     /// The Z coordinate.
     pub z: f32,
 }
-
-unsafe impl bytemuck::Pod for Point {}
-unsafe impl bytemuck::Zeroable for Point {}
 
 impl Point {
     /// The point that lies at `(0, 0, 0)`.
@@ -109,103 +94,30 @@ impl From<Point> for Vector {
     }
 }
 
-impl Object {
-    /// Creates a new `Object`.
-    ///
-    /// # Arguments
-    ///
-    /// - `position`: the position of `mesh` in world space.
-    /// - `rotation`: the rotation of `mesh`.
-    /// - `scale`: the scale factor of `mesh`. A scale factor of 1 represents the
-    ///   original mesh size.
-    /// - `material`: The material applied to `mesh`.
-    /// - `mesh`: The mesh.
-    pub fn new(
-        position: Point,
-        rotation: Rotation,
-        scale: f32,
-        material: Material,
-        mesh: Mesh,
-    ) -> Self {
-        Self {
-            position,
-            rotation,
-            scale,
-            material,
-            mesh,
-            resources: None,
-        }
-    }
-}
-
-/// A [mesh](Mesh), with a [material](Material) applied, within a scene.
-#[derive(Debug)]
-pub struct Object {
-    position: Point,
-    rotation: Rotation,
-    scale: f32,
-    material: Material,
-    mesh: Mesh,
-    resources: Option<ObjectResources>,
-
-}
-
-impl Object {
-    pub fn position(&self) -> Point {
-        self.position
-    }
-
-    pub fn position_mut(&mut self) -> &mut Point {
-        &mut self.position
-    }
-
-    pub fn rotation(&self) -> Rotation {
-        self.rotation
-    }
-
-    pub fn rotation_mut(&mut self) -> &mut Rotation {
-        &mut self.rotation
-    }
-
-    pub fn scale(&self) -> f32 {
-        self.scale
-    }
-
-    pub fn scale_mut(&mut self) -> &mut f32 {
-        &mut self.scale
-    }
-
-    pub fn material(&self) -> &Material {
-        &self.material
-    }
-
-    pub fn material_mut(&mut self) -> &mut Material {
-        &mut self.material
-    }
-
-    pub fn mesh(&self) -> &Mesh {
-        &self.mesh
-    }
-
-    pub fn mutate_mesh(&mut self, f: impl FnOnce(&mut Mesh)) {
-        f(&mut self.mesh);
-    }
-}
-
+/// Gimbal rotation across three axes.
+///
+/// [`x`](Self::x), [`y`](Self::y), and [`z`](Self::z) are in radians. The Z axis is rotated first,
+/// followed by Y and then X.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Rotation {
+    /// The rotation, in radians, in the X axis.
+    ///
+    /// During transformation matrix generation, this rotation is applied third.
     pub x: f32,
+    /// The rotation, in radians, in the Y axis.
+    ///
+    /// During transformation matrix generation, this rotation is applied second.
     pub y: f32,
+    /// The rotation, in radians, in the Z axis.
+    ///
+    /// During transformation matrix generation, this rotation is applied first.
     pub z: f32,
 }
 
 impl Rotation {
     pub const ZERO: Self = Self { x: 0., y: 0., z: 0. };
 }
-
-#[derive(Clone, Debug)]
-pub struct Material;
 
 #[derive(Clone, Debug)]
 pub struct Mesh {
@@ -228,7 +140,7 @@ unsafe impl bytemuck::Zeroable for MeshVertex {}
 
 impl MeshTriangle {
     /// Creates a new `MeshTriangle` from a triad of vertex indices.
-    pub fn new(indices: [MeshVertexIndex; 3]) -> Self {
+    pub const fn new(indices: [MeshVertexIndex; 3]) -> Self {
         Self(indices)
     }
 }
@@ -240,15 +152,90 @@ pub struct MeshTriangle([MeshVertexIndex; 3]);
 unsafe impl bytemuck::Pod for MeshTriangle {}
 unsafe impl bytemuck::Zeroable for MeshTriangle {}
 
+#[derive(Clone, Debug)]
+pub struct Material;
+
 #[derive(Debug)]
-struct ObjectResources {
-    index_buffer: wgpu::Buffer,
-    vertex_buffer: wgpu::Buffer,
+pub struct Camera<R> {
+    /// The location of this camera in world space.
+    pub position: Point,
+    /// A point, in world space, that this camera is 'looking at'.
+    ///
+    /// This *target point* determines the pitch and yaw of this camera, so-to-speak. This point
+    /// must not be equivalent to [the position](Self::position).
+    pub target: Point,
+    /// The current roll angle in radians.
+    pub roll: f32,
+    pub resources: R,
 }
 
-impl Drop for ObjectResources {
-    fn drop(&mut self) {
-        self.index_buffer.destroy();
-        self.vertex_buffer.destroy();
+impl<R> Camera<R> {
+    pub fn transformation_matrix(&self) -> Matrix {
+        // TODO
+        Matrix::IDENTITY
     }
+}
+
+pub trait CameraResources {
+    fn transformation_matrix_bind_group(&self) -> &wgpu::BindGroup;
+}
+
+/// A [mesh](Mesh), with a [material](Material) applied, within a scene.
+#[derive(Clone, Debug)]
+pub struct Object<R> {
+    /// The position of [the mesh](Self::mesh) in world space.
+    pub position: Point,
+    /// The rotation of [the mesh](Self::mesh).
+    pub rotation: Rotation,
+    /// The scale factor of this object's mesh.
+    ///
+    /// A scale factor of 1 represents the original mesh size.
+    pub scale: f32,
+    /// The mesh.
+    pub mesh: Mesh,
+    /// The material applied to [the mesh](Self::mesh).
+    pub material: Material,
+    pub resources: R,
+}
+
+impl<R> Object<R> {
+    pub fn transforms(&self) -> ObjectTransforms {
+        ObjectTransforms {
+            position: self.position,
+            // This doesn't matter; it doesn't exist as far as WGSL cares.
+            _0: *b"Hey!",
+            rotation: self.rotation,
+            scale: self.scale,
+        }
+    }
+}
+
+/// Parameters for object transformation matrix generation.
+///
+/// This type is padded to meet WGSL alignment requirements.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectTransforms {
+    /// The position obtained from [`Object::position`].
+    position: Point,
+    /// Padding between [`position`](Self::position) and [`rotation`](Self::rotation).
+    ///
+    /// `rotation` is represented as `vec<f32>` in WGSL, which has an alignment of 16. Because
+    /// `position` has a size of only 12 bytes, we need to pad it with 4 bytes.
+    _0: [u8; 4],
+    /// The rotation obtained from [`Object::rotation`].
+    rotation: Rotation,
+    /// The scale factor obtained from [`Object::scale`].
+    scale: f32,
+}
+
+unsafe impl bytemuck::Pod for ObjectTransforms {}
+unsafe impl bytemuck::Zeroable for ObjectTransforms {}
+
+pub trait ObjectResources {
+    fn transforms_bind_group(&self) -> &wgpu::BindGroup;
+
+    fn index_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
+
+    fn vertex_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
 }

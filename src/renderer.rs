@@ -1,68 +1,86 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use raw_window_handle::HasRawWindowHandle;
-use wgpu::{*, util::DeviceExt as _};
+use wgpu::*;
 
-use crate::{Camera, Mesh, MeshVertex, Object, Point, Rotation};
+use crate::{
+    Camera,
+    CameraResources,
+    MeshVertex,
+    Object,
+    ObjectResources,
+};
 
+/// The hardcoded texture format for [`Renderer::surface`] and which serves as the output of the
+/// fragment shader.
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
+/// The cause of a failure during [`Renderer` creation](Renderer::new).
 #[derive(Debug)]
 pub enum Error {
+    /// A graphics adapter was requested but none was returned.
+    ///
+    /// This could be for a few reasons:
+    /// 1. instance creation failed due to unavailable backends;
+    /// 2. the rendering surface produced from the given window was invalid;
+    /// 3. the given power preference did not match any available graphics adapters; or
+    /// 4. *wgpu*, your OS, or your graphics drivers failed.
     NoCompatibleAdapterFound,
+    /// A handle to a graphics device was requested but none was returned.
+    ///
+    /// This error is likely rare and may represent a problem outside the control of Pylon.
     NoCompatibleDeviceFound,
 }
 
+/// The physical dimensions of a rendering surface.
+///
+/// [`Renderer::resize_surface`] consumes an argument of this type.
+pub struct SurfaceSize {
+    /// The width, in pixels, of the surface.
+    pub width: u32,
+    /// The height, in pixels, of the surface.
+    pub height: u32,
+}
+
 /// Pylon's 3D renderer.
+///
+/// From a data perspective, this type is the combination of a surface&mdash;upon which rendering
+/// takes place&mdash;and a handle to a GPU. In terms of functionality, a `Renderer` is created with
+/// [`new`](Self::new), and [`render`](Self::render) renders a scene to the aforementioned surface.
 #[derive(Debug)]
 pub struct Renderer {
     device: Device,
+    camera_transformation_matrix_bind_group_layout: BindGroupLayout,
+    object_transforms_bind_group_layout: BindGroupLayout,
     pipeline: RenderPipeline,
     queue: Queue,
     surface: Surface,
-    uniforms: Uniforms,
 }
-
-#[derive(Debug)]
-struct Uniforms {
-    object_transforms: Uniform,
-    camera: Uniform,
-}
-
-#[derive(Debug)]
-struct Uniform {
-    buffer: Buffer,
-    bind_group: BindGroup,
-    bind_group_layout: BindGroupLayout,
-}
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug)]
-struct ObjectTransforms {
-    position: Point,
-    _0: [u8; 4],
-    rotation: Rotation,
-    scale: f32,
-}
-
-unsafe impl bytemuck::Pod for ObjectTransforms {}
-unsafe impl bytemuck::Zeroable for ObjectTransforms {}
 
 impl Renderer {
     /// Creates a new `Renderer`.
     ///
     /// # Safety
     ///
-    /// `window` must live for as long as the returned renderer.
+    /// `window` must be valid and must live for as long as the returned renderer.
     pub async unsafe fn new(
         window: &impl HasRawWindowHandle,
         backends: Backends,
-        surface_width: u32,
-        surface_height: u32,
+        adapter_power_pref: PowerPreference,
+        surface_size: SurfaceSize,
     ) -> Result<Self, Error> {
-        let (adapter, surface) = Self::create_adapter_and_surface(window, backends).await?;
+        let (adapter, surface) = Self::create_adapter_and_surface(
+            window,
+            backends,
+            adapter_power_pref,
+        )
+        .await?;
+
         let surface_formats = surface.get_supported_formats(&adapter);
+        // Pipeline creation will probably panic later if the hardcoded surface format is
+        // unsupported.
         if !surface_formats.contains(&SURFACE_FORMAT) {
+            // TODO: We should support a few other formats to fall-back on.
             todo!(
                 "Unsupported surface format; available are: {}",
                 surface_formats
@@ -74,17 +92,25 @@ impl Renderer {
         }
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
-        let uniforms = Self::create_uniforms(&device);
-        let pipeline = Self::create_pipeline(&device, &uniforms);
+        let (
+            camera_transformation_matrix_bind_group_layout,
+            object_transforms_bind_group_layout,
+        ) = Self::create_uniform_bind_group_layouts(&device);
+        let pipeline = Self::create_pipeline(
+            &device,
+            &camera_transformation_matrix_bind_group_layout,
+            &object_transforms_bind_group_layout,
+        );
 
-        let mut this = Self {
+        let this = Self {
             device,
+            camera_transformation_matrix_bind_group_layout,
+            object_transforms_bind_group_layout,
             pipeline,
             queue,
             surface,
-            uniforms,
         };
-        this.resize_surface(surface_width, surface_height);
+        this.resize_surface(surface_size);
 
         Ok(this)
     }
@@ -94,17 +120,17 @@ impl Renderer {
     async fn create_adapter_and_surface(
         window: &impl HasRawWindowHandle,
         backends: Backends,
+        adapter_power_pref: PowerPreference,
     ) -> Result<(Adapter, Surface), Error> {
         let instance = Instance::new(backends);
 
-        // SAFETY: [`Instance::create_surface`] requires that the window is valid and will live for
-        // the lifetime of the returned surface. It would be a bug in `minifb` for the first
-        // invariant not to hold, and the second holds because both the window and surface live
-        // until the end of [`Ui::run`].
+        // SAFETY: [`Renderer::new`]'s safety contract promises that `window` is valid and will live
+        // for as long as `surface`.
         let surface = unsafe { instance.create_surface(window) };
 
         instance.request_adapter(&RequestAdapterOptions {
             compatible_surface: Some(&surface),
+            power_preference: adapter_power_pref,
             ..Default::default()
         })
         .await
@@ -125,46 +151,24 @@ impl Renderer {
         .map_err(|_| Error::NoCompatibleDeviceFound)
     }
 
-    fn create_uniforms(device: &Device) -> Uniforms {
-        Uniforms {
-            object_transforms: Self::create_uniform(
+    fn create_uniform_bind_group_layouts(
+        device: &Device,
+    ) -> (BindGroupLayout, BindGroupLayout) {
+        (
+            Self::create_uniform_bind_group_layout(
                 device,
-                std::mem::size_of::<ObjectTransforms>(),
+                "Pylon camera transformation matrix bind group layout",
             ),
-            camera: Self::create_uniform(
+            Self::create_uniform_bind_group_layout(
                 device,
-                std::mem::size_of::<[[f32; 4]; 4]>(),
+                "Pylon object transforms bind group layout",
             ),
-        }
+        )
     }
 
-    fn create_uniform(device: &Device, size: usize) -> Uniform {
-        let buffer = Self::create_uniform_buffer(device, size);
-        let bind_group_layout = Self::create_uniform_bind_group_layout(device);
-
-        Uniform {
-            bind_group: Self::create_uniform_bind_group(
-                device,
-                &bind_group_layout,
-                &buffer,
-            ),
-            buffer,
-            bind_group_layout,
-        }
-    }
-
-    fn create_uniform_buffer(device: &Device, size: usize) -> Buffer {
-        device.create_buffer(&BufferDescriptor {
-            label: None,
-            size: size as BufferAddress,
-            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-            mapped_at_creation: false,
-        })
-    }
-
-    fn create_uniform_bind_group_layout(device: &Device) -> BindGroupLayout {
+    fn create_uniform_bind_group_layout(device: &Device, label: &str) -> BindGroupLayout {
         device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: None,
+            label: Some(label),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::VERTEX,
@@ -177,24 +181,10 @@ impl Renderer {
             }],
         })
     }
-
-    fn create_uniform_bind_group(
-        device: &Device,
-        layout: &BindGroupLayout,
-        buffer: &Buffer,
-    ) -> BindGroup {
-        device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),
-            }],
-        })
-    }
 }
 
-macro_rules! create_shader_module {
+/// Creates a WGSL shader module from the WGSL code at the given path.
+macro_rules! create_wgsl_module {
     ($device:expr, $path:literal $(,)?) => {
         $device.create_shader_module(include_wgsl!($path))
     };
@@ -203,20 +193,21 @@ macro_rules! create_shader_module {
 impl Renderer {
     fn create_pipeline(
         device: &Device,
-        uniforms: &Uniforms,
+        camera_transformation_matrix_bind_group_layout: &BindGroupLayout,
+        object_transforms_bind_group_layout: &BindGroupLayout,
     ) -> RenderPipeline {
         device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: None,
+            label: Some("Pylon pipeline"),
             layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: None,
+                label: Some("Pylon pipeline layout"),
                 bind_group_layouts: &[
-                    &uniforms.camera.bind_group_layout,
-                    &uniforms.object_transforms.bind_group_layout,
+                    camera_transformation_matrix_bind_group_layout,
+                    object_transforms_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             })),
             vertex: VertexState {
-                module: &create_shader_module!(device, "shaders/vertex.wgsl"),
+                module: &create_wgsl_module!(device, "shaders/vertex.wgsl"),
                 entry_point: "main",
                 buffers: &[VertexBufferLayout {
                     array_stride: std::mem::size_of::<MeshVertex>() as BufferAddress,
@@ -225,7 +216,7 @@ impl Renderer {
                 }],
             },
             fragment: Some(FragmentState {
-                module: &create_shader_module!(device, "shaders/fragment.wgsl"),
+                module: &create_wgsl_module!(device, "shaders/fragment.wgsl"),
                 entry_point: "main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: SURFACE_FORMAT,
@@ -244,61 +235,92 @@ impl Renderer {
         })
     }
 
-    pub fn resize_surface(&mut self, width: u32, height: u32) {
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn create_camera_transformation_matrix_bind_group(
+        &self,
+        binding: BufferBinding,
+    ) -> BindGroup {
+        self.create_uniform_bind_group(
+            "Pylon camera transformation matrix bind group",
+            &self.camera_transformation_matrix_bind_group_layout,
+            binding,
+        )
+    }
+
+    pub fn create_object_transforms_bind_group(&self, binding: BufferBinding) -> BindGroup {
+        self.create_uniform_bind_group(
+            "Pylon object transforms bind group",
+            &self.object_transforms_bind_group_layout,
+            binding,
+        )
+    }
+
+    fn create_uniform_bind_group(
+        &self,
+        label: &str,
+        layout: &BindGroupLayout,
+        binding: BufferBinding,
+    ) -> BindGroup {
+        self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some(label),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(binding),
+            }],
+        })
+    }
+
+    /// Modifies the size of the rendering surface.
+    pub fn resize_surface(&self, new_size: SurfaceSize) {
         self.surface.configure(
             &self.device,
             &SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format: SURFACE_FORMAT,
-                width,
-                height,
-                present_mode: PresentMode::Immediate,
+                width: new_size.width,
+                height: new_size.height,
+                present_mode: PresentMode::AutoNoVsync,
             },
         );
     }
 
-    pub fn render<'a>(
-        &mut self,
-        camera: &Camera,
-        objects: impl Iterator<Item = &'a mut Object>,
+    /// Rasterizes a 3D scene into a 2D frame and sends it to the rendering surface.
+    pub fn render<'a, Cr: CameraResources, Or: 'a + ObjectResources>(
+        &self,
+        camera: &Camera<Cr>,
+        objects: impl IntoIterator<Item = &'a Object<Or>>,
     ) {
         let frame = self.surface.get_current_texture().unwrap();
-        let frame_view = Self::create_texture_view(&frame.texture);
-        self.queue.write_buffer(
-            &self.uniforms.camera.buffer,
-            0,
-            bytemuck::bytes_of(&camera.transformation_matrix().to_array()),
-        );
-
+        let frame_view = Self::create_frame_view(&frame.texture);
         let mut encoder = self.create_command_encoder();
+
         {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.uniforms.camera.bind_group, &[]);
+            pass.set_bind_group(
+                0,
+                camera.resources.transformation_matrix_bind_group(),
+                &[],
+            );
+
             for object in objects {
                 tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
 
-                self.queue.write_buffer(
-                    &self.uniforms.object_transforms.buffer,
-                    0,
-                    bytemuck::bytes_of(&self.create_object_transforms(object)),
-                );
-
-                let mesh = &object.mesh;
-                let object_resources = object
-                    .resources
-                    .get_or_insert_with(|| self.create_object_resources(mesh));
                 pass.set_bind_group(
                     1,
-                    &self.uniforms.object_transforms.bind_group,
+                    object.resources.transforms_bind_group(),
                     &[],
                 );
                 pass.set_vertex_buffer(
                     0,
-                    object_resources.vertex_buffer.slice(..),
+                    object.resources.vertex_buffer(),
                 );
                 pass.set_index_buffer(
-                    object_resources.index_buffer.slice(..),
+                    object.resources.index_buffer(),
                     IndexFormat::Uint32,
                 );
 
@@ -311,9 +333,12 @@ impl Renderer {
         frame.present();
     }
 
-    fn create_texture_view(texture: &Texture) -> TextureView {
-        texture.create_view(&TextureViewDescriptor {
-            label: None,
+    /// Creates a texture view for the current surface frame.
+    fn create_frame_view(frame: &Texture) -> TextureView {
+        frame.create_view(&TextureViewDescriptor {
+            label: Some("Pylon frame view"),
+            // I think we can leave most of these as the defaults and *wgpu* will fill them in for
+            // us.
             format: None,
             dimension: None,
             aspect: TextureAspect::All,
@@ -324,57 +349,33 @@ impl Renderer {
         })
     }
 
-    fn create_object_resources(&self, mesh: &Mesh) -> crate::ObjectResources {
-        crate::ObjectResources {
-            index_buffer: self.create_buffer(
-                &mesh.triangles,
-                BufferUsages::INDEX,
-            ),
-            vertex_buffer: self.create_buffer(
-                &mesh.vertex_pool,
-                BufferUsages::VERTEX,
-            ),
-        }
-    }
-
-    fn create_buffer<T>(&self, slice: &[T], usage: BufferUsages) -> Buffer
-    where
-        T: bytemuck::Pod + bytemuck::Zeroable,
-    {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(slice),
-            usage,
+    /// Creates a new command encoder for use in [`render`](Self::render).
+    fn create_command_encoder(&self) -> CommandEncoder {
+        self.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Pylon command encoder")
         })
     }
 
-    fn create_command_encoder(&self) -> CommandEncoder {
-        self.device.create_command_encoder(&CommandEncoderDescriptor::default())
-    }
-
+    /// Creates the render pass for the current surface frame.
     fn create_render_pass<'a>(
         encoder: &'a mut CommandEncoder,
-        view: &'a TextureView,
+        frame_view: &'a TextureView,
     ) -> RenderPass<'a> {
         encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("Pylon surface frame render pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view,
+                view: frame_view,
                 resolve_target: None,
                 ops: Operations {
+                    // We can either clear or load here. Clearing wipes the frame with a given color
+                    // while loading initializes the frame with the current state of the surface.
                     load: LoadOp::Load,
+                    // The surface frame contains the final result of the render, so obviously we
+                    // need to write to it.
                     store: true,
                 },
             })],
-            ..Default::default()
+            depth_stencil_attachment: None,
         })
-    }
-
-    fn create_object_transforms(&self, object: &Object) -> ObjectTransforms {
-        ObjectTransforms {
-            position: object.position,
-            _0: Default::default(),
-            rotation: object.rotation,
-            scale: object.scale,
-        }
     }
 }

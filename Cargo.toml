@@ -14,4 +14,5 @@ wgpu = "0.13"
 fps_counter = "2.0"
 pollster = "0.2"
 tracing-subscriber = "0.3"
+wgpu-allocators = { git = "https://github.com/norepimorphism/wgpu-allocators" }
 winit = "0.26"

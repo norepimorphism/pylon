@@ -1,5 +1,15 @@
 use fps_counter::FPSCounter;
-use pylon_engine::*;
+use pylon_engine::{
+    Camera,
+    Material,
+    Mesh,
+    MeshTriangle,
+    MeshVertex,
+    Object,
+    Point,
+    Renderer,
+    Rotation,
+};
 use winit::{
     event::{ElementState, Event, MouseButton, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -15,7 +25,7 @@ fn main() {
     let window = create_window(&event_loop);
     let mut gfx = create_gfx(&window);
     let camera = create_camera();
-    let mut cube = create_cube();
+    let mut cube = create_cube(&gfx);
 
     let mut tick_count: f32 = 0.;
     let mut mouse_position = Point::ORIGIN;
@@ -59,23 +69,21 @@ fn main() {
             Event::RedrawRequested(_) => {
                 // Update cube position.
                 let orbit_angle = tick_count / 10.0;
-                let position = cube.position_mut();
-                position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
-                position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
+                cube.position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
+                cube.position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
 
                 // Update cube rotation.
-                let rotation = cube.rotation_mut();
-                rotation.x += tick_count / 10_000.0;
-                rotation.y += tick_count / 10_000.0;
+                cube.rotation.x += tick_count / 10_000.0;
+                cube.rotation.y += tick_count / 10_000.0;
 
                 // Update cube scale.
-                *cube.scale_mut() = if mouse_is_down {
+                cube.scale = if mouse_is_down {
                     0.1
                 } else {
                     0.05 + ((tick_count / 10.0).sin() + 1.0) / 50.0
                 };
 
-                gfx.render(&camera, [&mut cube].into_iter());
+                //gfx.render(&camera, [&mut cube]);
 
                 tick_count += 1.0;
                 last_fps = fps_counter.tick()
@@ -107,28 +115,41 @@ fn create_gfx(window: &Window) -> Renderer {
         Renderer::new(
             window,
             wgpu::Backends::all(),
-            WINDOW_SIZE as u32,
-            WINDOW_SIZE as u32,
+            wgpu::PowerPreference::HighPerformance,
+            pylon_engine::renderer::SurfaceSize {
+                width: WINDOW_SIZE as u32,
+                height: WINDOW_SIZE as u32,
+            },
         )
     })
     .unwrap()
 }
 
-fn create_camera() -> Camera {
+fn create_camera() -> Camera<CameraResources> {
     Camera {
         position: Point::ORIGIN,
         target: Point::ORIGIN,
         roll: 1.,
+        resources: CameraResources { },
     }
 }
 
-fn create_cube() -> Object {
-    Object::new(
-        Point::ORIGIN,
-        Rotation::ZERO,
-        0.05,
-        Material,
-        Mesh {
+struct CameraResources {
+
+}
+
+fn create_cube(heap: &wgpu_allocators::Heap, gfx: &Renderer) -> Object<CubeResources> {
+
+
+    let resources = CubeResources {
+        transforms_bind_group: gfx.create_object_transforms_bind_group(binding)
+    };
+
+    Object {
+        position: Point::ORIGIN,
+        rotation: Rotation::ZERO,
+        scale: 1.,
+        mesh: Mesh {
             vertex_pool: vec![
                 // 0.
                 MeshVertex {
@@ -192,5 +213,25 @@ fn create_cube() -> Object {
                 MeshTriangle::new([3, 5, 7]),
             ],
         },
-    )
+        material: Material,
+        resources,
+    }
+}
+
+struct CubeResources {
+    transforms_bind_group: wgpu::BindGroup,
+}
+
+impl pylon_engine::ObjectResources for CubeResources {
+    fn transforms_bind_group(&self) -> &wgpu::BindGroup {
+        &self.transforms_bind_group
+    }
+
+    fn index_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a> {
+
+    }
+
+    fn vertex_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a> {
+
+    }
 }
