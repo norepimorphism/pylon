@@ -9,6 +9,7 @@ use crate::{
     MeshVertex,
     Object,
     ObjectResources,
+    Uniform,
 };
 
 /// The hardcoded texture format for [`Renderer::surface`] and which serves as the output of the
@@ -239,39 +240,45 @@ impl Renderer {
         &self.device
     }
 
-    pub fn create_camera_transformation_matrix_bind_group(
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn create_camera_transformation_matrix_uniform(
         &self,
         binding: BufferBinding,
-    ) -> BindGroup {
-        self.create_uniform_bind_group(
+    ) -> Uniform {
+        self.create_uniform(
             "Pylon camera transformation matrix bind group",
             &self.camera_transformation_matrix_bind_group_layout,
             binding,
         )
     }
 
-    pub fn create_object_transforms_bind_group(&self, binding: BufferBinding) -> BindGroup {
-        self.create_uniform_bind_group(
+    pub fn create_object_transforms_uniform(&self, binding: BufferBinding) -> Uniform {
+        self.create_uniform(
             "Pylon object transforms bind group",
             &self.object_transforms_bind_group_layout,
             binding,
         )
     }
 
-    fn create_uniform_bind_group(
+    fn create_uniform(
         &self,
-        label: &str,
+        bind_group_label: &str,
         layout: &BindGroupLayout,
         binding: BufferBinding,
-    ) -> BindGroup {
-        self.device.create_bind_group(&BindGroupDescriptor {
-            label: Some(label),
-            layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(binding),
-            }],
-        })
+    ) -> Uniform {
+        Uniform {
+            bind_group: self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some(bind_group_label),
+                layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Buffer(binding),
+                }],
+            }),
+        }
     }
 
     /// Modifies the size of the rendering surface.
@@ -303,7 +310,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(
                 0,
-                camera.resources.transformation_matrix_bind_group(),
+                &camera.resources.transformation_matrix_uniform().bind_group,
                 &[],
             );
 
@@ -312,7 +319,7 @@ impl Renderer {
 
                 pass.set_bind_group(
                     1,
-                    object.resources.transforms_bind_group(),
+                    &object.resources.transforms_uniform().bind_group,
                     &[],
                 );
                 pass.set_vertex_buffer(

@@ -177,7 +177,7 @@ impl<R> Camera<R> {
 }
 
 pub trait CameraResources {
-    fn transformation_matrix_bind_group(&self) -> &wgpu::BindGroup;
+    fn transformation_matrix_uniform(&self) -> &Uniform;
 }
 
 /// A [mesh](Mesh), with a [material](Material) applied, within a scene.
@@ -233,9 +233,13 @@ unsafe impl bytemuck::Pod for ObjectTransforms {}
 unsafe impl bytemuck::Zeroable for ObjectTransforms {}
 
 pub trait ObjectResources {
-    fn transforms_bind_group(&self) -> &wgpu::BindGroup;
+    fn transforms_uniform(&self) -> &Uniform;
 
     fn index_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
 
     fn vertex_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
+}
+
+pub struct Uniform {
+    bind_group: wgpu::BindGroup,
 }
