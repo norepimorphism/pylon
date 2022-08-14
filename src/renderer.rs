@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Pylon's 3D renderer.
+
 use raw_window_handle::HasRawWindowHandle;
 use wgpu::*;
 
 use crate::{
     Camera,
-    CameraResources,
+    CameraTransformsUniform,
     MeshVertex,
     Object,
-    ObjectResources,
-    Uniform,
+    ObjectTransformsUniform,
+    TransformsUniform,
 };
 
 /// The hardcoded texture format for [`Renderer::surface`] and which serves as the output of the
@@ -35,12 +37,65 @@ pub enum Error {
 
 /// The physical dimensions of a rendering surface.
 ///
-/// [`Renderer::resize_surface`] consumes an argument of this type.
+/// [`Renderer::configure_surface`] consumes an argument of this type.
 pub struct SurfaceSize {
     /// The width, in pixels, of the surface.
     pub width: u32,
     /// The height, in pixels, of the surface.
     pub height: u32,
+}
+
+/// Layouts of Pylon's built-in bind groups.
+///
+/// A [renderer](Renderer) creates this once and references it during pipeline creation.
+#[derive(Debug)]
+struct BuiltinBindGroupLayouts {
+    /// The layout of the camera transformation matrix bind group.
+    for_camera: BindGroupLayout,
+    /// The layout of the object transformation matrix bind group.
+    for_object: BindGroupLayout,
+}
+
+impl BuiltinBindGroupLayouts {
+    /// Creates a new `BuiltinBindGroupLayouts`.
+    fn new(device: &Device) -> Self {
+        Self {
+            for_camera: Self::create_layout(
+                device,
+                "Pylon camera transformation matrix bind group layout",
+            ),
+            for_object: Self::create_layout(
+                device,
+                "Pylon object transformation matrix bind group layout",
+            ),
+        }
+    }
+
+    /// Creates the layout of a built-in bind group.
+    ///
+    /// As it happens that Pylon's built-in bind groups are identical in all but name, the `label`
+    /// field governs which layout this function produces.
+    fn create_layout(
+        device: &Device,
+        label: &str,
+    ) -> BindGroupLayout {
+        device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &[BindGroupLayoutEntry {
+                // This must match the binding in the vertex shader.
+                binding: 0,
+                // This layout need only be visible in the vertex shader. The fragment shader is
+                // completely user-controlled.
+                visibility: ShaderStages::VERTEX,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        })
+    }
 }
 
 /// Pylon's 3D renderer.
@@ -50,10 +105,12 @@ pub struct SurfaceSize {
 /// [`new`](Self::new), and [`render`](Self::render) renders a scene to the aforementioned surface.
 #[derive(Debug)]
 pub struct Renderer {
+    /// Layouts of Pylon's built-in bind groups.
+    ///
+    /// This field is populated once during [`new`](Self::new) and should be considered immutable
+    /// afterwards.
+    builtin_bind_group_layouts: BuiltinBindGroupLayouts,
     device: Device,
-    camera_transformation_matrix_bind_group_layout: BindGroupLayout,
-    object_transforms_bind_group_layout: BindGroupLayout,
-    pipeline: RenderPipeline,
     queue: Queue,
     surface: Surface,
 }
@@ -69,6 +126,7 @@ impl Renderer {
         backends: Backends,
         adapter_power_pref: PowerPreference,
         surface_size: SurfaceSize,
+        present_mode: PresentMode,
     ) -> Result<Self, Error> {
         let (adapter, surface) = Self::create_adapter_and_surface(
             window,
@@ -93,25 +151,16 @@ impl Renderer {
         }
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
-        let (
-            camera_transformation_matrix_bind_group_layout,
-            object_transforms_bind_group_layout,
-        ) = Self::create_uniform_bind_group_layouts(&device);
-        let pipeline = Self::create_pipeline(
-            &device,
-            &camera_transformation_matrix_bind_group_layout,
-            &object_transforms_bind_group_layout,
-        );
+        let builtin_bind_group_layouts = BuiltinBindGroupLayouts::new(&device);
 
         let this = Self {
+            builtin_bind_group_layouts,
             device,
-            camera_transformation_matrix_bind_group_layout,
-            object_transforms_bind_group_layout,
-            pipeline,
             queue,
             surface,
         };
-        this.resize_surface(surface_size);
+        // The surface must be configured before it is usable.
+        this.configure_surface(surface_size, present_mode);
 
         Ok(this)
     }
@@ -152,63 +201,49 @@ impl Renderer {
         .map_err(|_| Error::NoCompatibleDeviceFound)
     }
 
-    fn create_uniform_bind_group_layouts(
-        device: &Device,
-    ) -> (BindGroupLayout, BindGroupLayout) {
-        (
-            Self::create_uniform_bind_group_layout(
-                device,
-                "Pylon camera transformation matrix bind group layout",
-            ),
-            Self::create_uniform_bind_group_layout(
-                device,
-                "Pylon object transforms bind group layout",
-            ),
-        )
-    }
-
-    fn create_uniform_bind_group_layout(device: &Device, label: &str) -> BindGroupLayout {
-        device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some(label),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        })
+    /// Configures the rendering surface.
+    ///
+    /// This is automatically called during [`new`](Self::new). It may be called again to resize the
+    /// surface or modify the presentation mode.
+    pub fn configure_surface(&self, size: SurfaceSize, present_mode: PresentMode) {
+        self.surface.configure(
+            &self.device,
+            &SurfaceConfiguration {
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                format: SURFACE_FORMAT,
+                width: size.width,
+                height: size.height,
+                present_mode,
+            },
+        );
     }
 }
 
 /// Creates a WGSL shader module from the WGSL code at the given path.
-macro_rules! create_wgsl_module {
+macro_rules! create_wgsl_module_from_path {
     ($device:expr, $path:literal $(,)?) => {
         $device.create_shader_module(include_wgsl!($path))
     };
 }
 
 impl Renderer {
-    fn create_pipeline(
-        device: &Device,
-        camera_transformation_matrix_bind_group_layout: &BindGroupLayout,
-        object_transforms_bind_group_layout: &BindGroupLayout,
+    /// Creates a render pipeline for [an object](Object).
+    pub fn create_pipeline(
+        &self,
+        fragment_shader: ShaderSource,
     ) -> RenderPipeline {
-        device.create_render_pipeline(&RenderPipelineDescriptor {
+        self.device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Pylon pipeline"),
-            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            layout: Some(&self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Pylon pipeline layout"),
                 bind_group_layouts: &[
-                    camera_transformation_matrix_bind_group_layout,
-                    object_transforms_bind_group_layout,
+                    &self.builtin_bind_group_layouts.for_camera,
+                    &self.builtin_bind_group_layouts.for_object,
                 ],
                 push_constant_ranges: &[],
             })),
             vertex: VertexState {
-                module: &create_wgsl_module!(device, "shaders/vertex.wgsl"),
+                module: &create_wgsl_module_from_path!(self.device, "shaders/vertex.wgsl"),
                 entry_point: "main",
                 buffers: &[VertexBufferLayout {
                     array_stride: std::mem::size_of::<MeshVertex>() as BufferAddress,
@@ -217,9 +252,13 @@ impl Renderer {
                 }],
             },
             fragment: Some(FragmentState {
-                module: &create_wgsl_module!(device, "shaders/fragment.wgsl"),
+                module: &self.device.create_shader_module(ShaderModuleDescriptor {
+                    label: Some("Pylon fragment shader"),
+                    source: fragment_shader,
+                }),
                 entry_point: "main",
                 targets: &[Some(wgpu::ColorTargetState {
+                    // The output of the fragment shader must be compatible with this format.
                     format: SURFACE_FORMAT,
                     blend: None,
                     write_mask: ColorWrites::ALL,
@@ -236,43 +275,62 @@ impl Renderer {
         })
     }
 
-    pub fn device(&self) -> &wgpu::Device {
+    pub fn device(&self) -> &Device {
         &self.device
     }
 
-    pub fn queue(&self) -> &wgpu::Queue {
+    pub fn queue(&self) -> &Queue {
         &self.queue
     }
 
-    pub fn create_camera_transformation_matrix_uniform(
+    /// Creates a new `CameraTransformsUniform` with the given buffer binding.
+    ///
+    /// If the backing storage for the returned uniform changes, it *must* be recreated by calling
+    /// this function again with the new buffer binding.
+    pub fn create_camera_transforms_uniform(
         &self,
         binding: BufferBinding,
-    ) -> Uniform {
-        self.create_uniform(
-            "Pylon camera transformation matrix bind group",
-            &self.camera_transformation_matrix_bind_group_layout,
-            binding,
+    ) -> CameraTransformsUniform {
+        CameraTransformsUniform(
+            self.create_transforms_uniform(
+                "Pylon camera transformation matrix bind group",
+                &self.builtin_bind_group_layouts.for_camera,
+                binding,
+            )
         )
     }
 
-    pub fn create_object_transforms_uniform(&self, binding: BufferBinding) -> Uniform {
-        self.create_uniform(
-            "Pylon object transforms bind group",
-            &self.object_transforms_bind_group_layout,
-            binding,
+    /// Creates a new `ObjectTransformsUniform` with the given buffer binding.
+    ///
+    /// If the backing storage for the returned uniform changes, it *must* be recreated by calling
+    /// this function again with the new buffer binding.
+    pub fn create_object_transforms_uniform(
+        &self,
+        binding: BufferBinding,
+    ) -> ObjectTransformsUniform {
+        ObjectTransformsUniform(
+            self.create_transforms_uniform(
+                "Pylon object transforms bind group",
+                &self.builtin_bind_group_layouts.for_object,
+                binding,
+            )
         )
     }
 
-    fn create_uniform(
+    /// Creates a new `TransformsUniform`.
+    ///
+    /// As it happens that Pylon's built-in bind groups are identical in all but name, the
+    /// `bind_group_label` field governs which bind group this function produces.
+    fn create_transforms_uniform(
         &self,
         bind_group_label: &str,
-        layout: &BindGroupLayout,
+        bind_group_layout: &BindGroupLayout,
         binding: BufferBinding,
-    ) -> Uniform {
-        Uniform {
+    ) -> TransformsUniform {
+        TransformsUniform {
             bind_group: self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some(bind_group_label),
-                layout,
+                layout: bind_group_layout,
                 entries: &[BindGroupEntry {
                     binding: 0,
                     resource: BindingResource::Buffer(binding),
@@ -281,25 +339,11 @@ impl Renderer {
         }
     }
 
-    /// Modifies the size of the rendering surface.
-    pub fn resize_surface(&self, new_size: SurfaceSize) {
-        self.surface.configure(
-            &self.device,
-            &SurfaceConfiguration {
-                usage: TextureUsages::RENDER_ATTACHMENT,
-                format: SURFACE_FORMAT,
-                width: new_size.width,
-                height: new_size.height,
-                present_mode: PresentMode::AutoNoVsync,
-            },
-        );
-    }
-
     /// Rasterizes a 3D scene into a 2D frame and sends it to the rendering surface.
-    pub fn render<'a, Cr: CameraResources, Or: 'a + ObjectResources>(
+    pub fn render<'a, C: Camera, O: 'a + Object>(
         &self,
-        camera: &Camera<Cr>,
-        objects: impl IntoIterator<Item = &'a Object<Or>>,
+        camera: &C,
+        objects: impl IntoIterator<Item = &'a O>,
     ) {
         let frame = self.surface.get_current_texture().unwrap();
         let frame_view = Self::create_frame_view(&frame.texture);
@@ -307,31 +351,44 @@ impl Renderer {
 
         {
             let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(
                 0,
-                &camera.resources.transformation_matrix_uniform().bind_group,
+                &camera.transforms_uniform().0.bind_group,
                 &[],
             );
 
             for object in objects {
-                tracing::debug!("Rendering {} triangles...", object.mesh.triangles.len());
+                let triangle_count = object.triangle_count();
 
+                tracing::debug!("Rendering {} triangles...", triangle_count);
+
+                pass.set_pipeline(object.render_pipeline());
                 pass.set_bind_group(
                     1,
-                    &object.resources.transforms_uniform().bind_group,
+                    &object.transforms_uniform().0.bind_group,
                     &[],
                 );
+                for slot in object.bind_group_slots() {
+                    if slot.index < 2 {
+                        panic!("slots 0 and 1 cannot be overwritten");
+                    }
+
+                    pass.set_bind_group(
+                        slot.index,
+                        slot.bind_group,
+                        &[],
+                    );
+                }
                 pass.set_vertex_buffer(
                     0,
-                    object.resources.vertex_buffer(),
+                    object.vertex_buffer(),
                 );
                 pass.set_index_buffer(
-                    object.resources.index_buffer(),
+                    object.index_buffer(),
                     IndexFormat::Uint32,
                 );
 
-                let index_count = (3 * object.mesh.triangles.len()) as u32;
+                let index_count = (3 * triangle_count) as u32;
                 pass.draw_indexed(0..index_count, 0, 0..1);
             }
         }

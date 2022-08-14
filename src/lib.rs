@@ -7,7 +7,7 @@
 //! Pylon cannot predict the future&mdash;*yet*&mdash;so it assumes that library consumers know best
 //! about how their objects are created and used and, more importantly, how memory is optimally
 //! managed. As such, memory management is performed externally and interfaced through Pylon via
-//! [`CameraResources`] and [`ObjectResources`].
+//! [`Camera`] and [`Object`].
 //!
 //! # Coordinate Spaces
 //!
@@ -50,11 +50,12 @@
 
 pub mod linear;
 pub mod renderer;
+pub mod tree;
 
 pub use linear::{Matrix, Vector};
 pub use renderer::Renderer;
 
-/// The integral type for indexing a mesh's [vertex pool](Mesh::vertex_pool).
+/// The integral type for indexing a mesh's vertex pool.
 pub type MeshVertexIndex = u32;
 
 impl From<Vector> for Point {
@@ -119,16 +120,7 @@ impl Rotation {
     pub const ZERO: Self = Self { x: 0., y: 0., z: 0. };
 }
 
-#[derive(Clone, Debug)]
-pub struct Mesh {
-    /// The vertices that make up this mesh.
-    pub vertex_pool: Vec<MeshVertex>,
-    /// Triads of vertices from [`Self::vertex_pool`] that define the triangle primitives of this
-    /// mesh.
-    pub triangles: Vec<MeshTriangle>
-}
-
-/// A vertex within a [mesh](Mesh).
+/// A vertex within a mesh.
 #[derive(Clone, Copy, Debug)]
 pub struct MeshVertex {
     /// The location of this vertex in mesh space.
@@ -145,7 +137,7 @@ impl MeshTriangle {
     }
 }
 
-/// A triangle within a [mesh](Mesh).
+/// A triangle within a mesh.
 #[derive(Clone, Copy, Debug)]
 pub struct MeshTriangle([MeshVertexIndex; 3]);
 
@@ -155,91 +147,57 @@ unsafe impl bytemuck::Zeroable for MeshTriangle {}
 #[derive(Clone, Debug)]
 pub struct Material;
 
-#[derive(Debug)]
-pub struct Camera<R> {
-    /// The location of this camera in world space.
-    pub position: Point,
-    /// A point, in world space, that this camera is 'looking at'.
+/// The interface to user-managed camera resources.
+pub trait Camera {
+    fn transforms_uniform(&self) -> &CameraTransformsUniform;
+}
+
+/// The interface to user-managed object resources.
+pub trait Object {
+    fn triangle_count(&self) -> u32;
+
+    /// The material applied to the mesh.
+    fn material(&self) -> &Material;
+
+    /// The [pipeline](wgpu::RenderPipeline) to be used during rendering of this object.
     ///
-    /// This *target point* determines the pitch and yaw of this camera, so-to-speak. This point
-    /// must not be equivalent to [the position](Self::position).
-    pub target: Point,
-    /// The current roll angle in radians.
-    pub roll: f32,
-    pub resources: R,
-}
+    /// This type may be created via [`Renderer::create_pipeline`].
+    fn render_pipeline(&self) -> &wgpu::RenderPipeline;
 
-impl<R> Camera<R> {
-    pub fn transformation_matrix(&self) -> Matrix {
-        // TODO
-        Matrix::IDENTITY
-    }
-}
+    fn transforms_uniform(&self) -> &ObjectTransformsUniform;
 
-pub trait CameraResources {
-    fn transformation_matrix_uniform(&self) -> &Uniform;
-}
-
-/// A [mesh](Mesh), with a [material](Material) applied, within a scene.
-#[derive(Clone, Debug)]
-pub struct Object<R> {
-    /// The position of [the mesh](Self::mesh) in world space.
-    pub position: Point,
-    /// The rotation of [the mesh](Self::mesh).
-    pub rotation: Rotation,
-    /// The scale factor of this object's mesh.
+    /// The [bind group slots](BindGroupSlot) to be assigned for rendering this object.
     ///
-    /// A scale factor of 1 represents the original mesh size.
-    pub scale: f32,
-    /// The mesh.
-    pub mesh: Mesh,
-    /// The material applied to [the mesh](Self::mesh).
-    pub material: Material,
-    pub resources: R,
-}
+    /// Slots are assigned in ascending order of index. If a slot is assigned to twice, the first
+    /// assignment is overwritten.
+    fn bind_group_slots<'a>(&'a self) -> &[BindGroupSlot<'a>];
 
-impl<R> Object<R> {
-    pub fn transforms(&self) -> ObjectTransforms {
-        ObjectTransforms {
-            position: self.position,
-            // This doesn't matter; it doesn't exist as far as WGSL cares.
-            _0: *b"Hey!",
-            rotation: self.rotation,
-            scale: self.scale,
-        }
-    }
-}
-
-/// Parameters for object transformation matrix generation.
-///
-/// This type is padded to meet WGSL alignment requirements.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct ObjectTransforms {
-    /// The position obtained from [`Object::position`].
-    position: Point,
-    /// Padding between [`position`](Self::position) and [`rotation`](Self::rotation).
+    /// A slice into a GPU buffer that contains the vertex index sequences that form the triangle
+    /// mesh of this object.
     ///
-    /// `rotation` is represented as `vec<f32>` in WGSL, which has an alignment of 16. Because
-    /// `position` has a size of only 12 bytes, we need to pad it with 4 bytes.
-    _0: [u8; 4],
-    /// The rotation obtained from [`Object::rotation`].
-    rotation: Rotation,
-    /// The scale factor obtained from [`Object::scale`].
-    scale: f32,
-}
-
-unsafe impl bytemuck::Pod for ObjectTransforms {}
-unsafe impl bytemuck::Zeroable for ObjectTransforms {}
-
-pub trait ObjectResources {
-    fn transforms_uniform(&self) -> &Uniform;
-
+    /// To guarantee vertex shader compatibility, this buffer should contain a packed sequence of
+    /// [`MeshTriangle`]s.
     fn index_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
 
+    /// A slice into a GPU buffer that contains the vertex data for this object.
+    ///
+    /// To guarantee vertex shader compatibility, this buffer should contain a sequence of
+    /// [`MeshVertex`]s.
     fn vertex_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a>;
 }
 
-pub struct Uniform {
+pub struct CameraTransformsUniform(TransformsUniform);
+
+pub struct ObjectTransformsUniform(TransformsUniform);
+
+struct TransformsUniform {
     bind_group: wgpu::BindGroup,
+}
+
+/// The assignment of [a bind group](wgpu::BindGroup) to a bind group slot.
+pub struct BindGroupSlot<'a> {
+    /// The index of the slot that [the bind group](Self::bind_group) should inhabit.
+    pub index: u32,
+    /// The bind group to be assigned to the slot described by [`index`](Self::index).
+    pub bind_group: &'a wgpu::BindGroup,
 }
