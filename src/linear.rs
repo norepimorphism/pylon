@@ -140,6 +140,12 @@ impl Mul<Self> for Matrix {
     }
 }
 
+impl MulAssign for Matrix {
+    fn mul_assign(&mut self, rhs: Self) {
+        *self = *self * rhs;
+    }
+}
+
 impl Vector {
     pub const fn new(r0: Scalar, r1: Scalar, r2: Scalar, r3: Scalar) -> Self {
         Self(Simd::from_array([r0, r1, r2, r3]))

@@ -11,8 +11,6 @@ use pylon_engine::{
     ObjectTransformsUniform,
     Point,
     Renderer,
-    Rotation,
-    Vector,
 };
 use wgpu::BufferAddress;
 use wgpu_allocators::{Allocator as _, HeapUsages, NonZeroBufferAddress};
@@ -102,22 +100,34 @@ fn main() {
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
+                let tn = &mut cube.transforms_node;
+
                 // Update cube position.
-                let orbit_angle = tick_count / 100.0;
-                cube.position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
-                cube.position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
+                {
+                    let orbit_angle = tick_count / 100.0;
+                    let position = tn.position_mut();
+                    position.x = mouse_position.x + (orbit_angle.cos() / 10.0);
+                    position.y = mouse_position.y + (orbit_angle.sin() / 10.0);
+                }
 
                 // Update cube rotation.
-                let rotation_angle = tick_count / 10_000.0;
-                cube.rotation.x = rotation_angle;
-                cube.rotation.y = rotation_angle;
+                {
+                    let rotation_angle = tick_count / 10_000.0;
+                    let rotation = tn.rotation_mut();
+                    rotation.x = rotation_angle;
+                    rotation.y = rotation_angle;
+                }
 
                 // Update cube scale.
-                cube.scale = if mouse_is_down {
-                    0.1
-                } else {
-                    0.05 + ((tick_count / 10_000.0).sin() + 1.0) / 50.0
-                };
+                {
+                    *tn.scale_mut() = if mouse_is_down {
+                        0.1
+                    } else {
+                        0.05 + ((tick_count / 10_000.0).sin() + 1.0) / 50.0
+                    };
+                }
+
+                tn.invalidate_cache();
 
                 let mut command_encoder = gfx.device().create_command_encoder(
                     &wgpu::CommandEncoderDescriptor { label: None },
@@ -141,7 +151,7 @@ fn main() {
                 uniform_heap.write_and_flush(
                     &mut command_encoder,
                     cube.transforms_range.clone(),
-                    bytemuck::bytes_of(&cube.transformation_matrix().to_array()),
+                    bytemuck::bytes_of(&tn.local_transformation_matrix().to_array()),
                 );
                 // I'm not really sure why the GPU can't do this for us, but *wgpu* will get upset
                 // if our staging buffer is still mapped when the command buffer is submitted.
@@ -212,9 +222,6 @@ fn create_camera(
     .expect("transformation matrix allocation failed");
 
     let camera = Camera {
-        position: Point::ORIGIN,
-        target: Point::ORIGIN,
-        roll: 1.,
         transforms_uniform: gfx.create_camera_transforms_uniform(
             uniform_heap.binding(transformation_matrix_range.clone())
         ),
@@ -230,9 +237,6 @@ fn create_camera(
 }
 
 struct Camera {
-    position: Point,
-    target: Point,
-    roll: f32,
     transforms_uniform: CameraTransformsUniform,
 }
 
@@ -311,9 +315,6 @@ fn create_cube(
 
     Cube {
         mesh,
-        position: Point::ORIGIN,
-        rotation: Rotation::ZERO,
-        scale: 1.,
         render_pipeline: gfx.create_pipeline(wgpu::ShaderSource::Wgsl(
             std::borrow::Cow::Borrowed(r#"
                 @fragment
@@ -327,6 +328,7 @@ fn create_cube(
                 }
             "#)
         )),
+        transforms_node: pylon_engine::tree::Node::default(),
         transforms_range: transforms_range.clone(),
         transforms_uniform: gfx.create_object_transforms_uniform(
             uniform_heap.binding(transforms_range)
@@ -412,16 +414,9 @@ struct Mesh {
 struct Cube {
     /// The mesh.
     mesh: Mesh,
-    /// The position of this cube in world space.
-    position: Point,
-    /// The 3D gimbal rotation, in radians, of this cube.
-    rotation: Rotation,
-    /// The scale factor of this cube's [mesh](Self::mesh).
-    ///
-    /// A factor of 1 represents the original size of the mesh.
-    scale: f32,
     /// The render pipeline for this cube.
     render_pipeline: wgpu::RenderPipeline,
+    transforms_node: pylon_engine::tree::Node,
     /// The range of bytes in the uniform heap allocated to the transformation matrix for this cube.
     transforms_range: Range<BufferAddress>,
     /// The uniform for this cube's transformation matrix.
@@ -465,92 +460,4 @@ impl pylon_engine::Object for Cube {
     fn vertex_buffer<'a>(&'a self) -> wgpu::BufferSlice<'a> {
         self.index_and_vertex_heap.slice(self.vertex_buffer_range.clone())
     }
-}
-
-impl Cube {
-    /// The transformation matrix.
-    ///
-    /// This is the product of all object transformation matrices.
-    fn transformation_matrix(&self) -> Matrix {
-        // Because we're using pre-multiplication, the order here is reversed. The true order is:
-        // 1. Scale.
-        // 2. Rotate.
-        // 3. Translate.
-        return self.position_matrix() * self.rotation_matrix() * self.scale_matrix();
-    }
-
-    /// The transformation matrix for the position transform of this object.
-    ///
-    /// This is applied after the scale matrix.
-    fn position_matrix(&self) -> Matrix {
-        let mut m = Matrix::IDENTITY;
-        m.columns_mut()[3] += Vector::from(self.position);
-
-        return m;
-    }
-
-    fn rotation_matrix(&self) -> Matrix {
-        return self.x_rotation_matrix() * self.y_rotation_matrix() * self.z_rotation_matrix();
-    }
-
-    fn x_rotation_matrix(&self) -> Matrix {
-        let SinCos { sin: s, cos: c } = SinCos::new(self.rotation.x);
-
-        return Matrix::new(
-            1., 0., 0., 0.,
-            0.,  c, -s, 0.,
-            0.,  s,  c, 0.,
-            0., 0., 0., 1.,
-        );
-    }
-
-    fn y_rotation_matrix(&self) -> Matrix {
-        let SinCos { sin: s, cos: c } =  SinCos::new(self.rotation.y);
-
-        return Matrix::new(
-             c, 0.,  s, 0.,
-            0., 1., 0., 0.,
-            -s, 0.,  c, 0.,
-            0., 0., 0., 1.,
-        );
-    }
-
-    fn z_rotation_matrix(&self) -> Matrix {
-        let SinCos { sin: s, cos: c } = SinCos::new(self.rotation.z);
-
-        return Matrix::new(
-             c, -s, 0., 0.,
-             s,  c, 0., 0.,
-            0., 0., 1., 0.,
-            0., 0., 0., 1.,
-        );
-    }
-
-    /// The transformation matrix for the scale transform of this object.
-    ///
-    /// This is applied first.
-    fn scale_matrix(&self) -> Matrix {
-        let f = self.scale;
-
-        return Matrix::new(
-             f, 0., 0., 0.,
-            0.,  f, 0., 0.,
-            0., 0.,  f, 0.,
-            0., 0., 0., 1.,
-        );
-    }
-}
-
-impl SinCos {
-    fn new(radians: f32) -> Self {
-        Self {
-            sin: radians.sin(),
-            cos: radians.cos(),
-        }
-    }
-}
-
-struct SinCos {
-    sin: f32,
-    cos: f32,
 }
