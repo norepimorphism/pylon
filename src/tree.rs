@@ -64,13 +64,17 @@ impl Node {
         &mut self.scale
     }
 
+    pub fn invalidate_global_cache(&self) {
+        self.cached_transformation_matrices.invalidate_global();
+    }
+
     pub fn invalidate_cache(&self) {
-        self.cached_transformation_matrices.invalidate();
+        self.cached_transformation_matrices.invalidate_all();
     }
 
     /// The global transformation matrix for this node.
     ///
-    /// This will return a cached copy if one is available and `use_cache` is set to `true`.
+    /// This will return a cached copy if one is available.
     pub fn global_transformation_matrix(&self) -> Matrix {
         self.transformation_matrix(
             &self.cached_transformation_matrices.global,
@@ -80,7 +84,7 @@ impl Node {
 
     /// The local transformation matrix for this node.
     ///
-    /// This will return a cached copy if one is available and `use_cache` is set to `true`.
+    /// This will return a cached copy if one is available.
     pub fn local_transformation_matrix(&self) -> Matrix {
         self.transformation_matrix(
             &self.cached_transformation_matrices.local,
@@ -120,8 +124,12 @@ struct CachedTransformationMatrices {
 }
 
 impl CachedTransformationMatrices {
-    fn invalidate(&self) {
+    fn invalidate_global(&self) {
         self.global.set(None);
+    }
+
+    fn invalidate_all(&self) {
+        self.invalidate_global();
         self.local.set(None);
     }
 }
