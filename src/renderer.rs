@@ -18,6 +18,8 @@ use crate::{
 /// fragment shader.
 const SURFACE_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
+const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth24Plus;
+
 /// The cause of a failure during [`Renderer` creation](Renderer::new).
 #[derive(Debug)]
 pub enum Error {
@@ -110,6 +112,7 @@ pub struct Renderer {
     /// This field is populated once during [`new`](Self::new) and should be considered immutable
     /// afterwards.
     builtin_bind_group_layouts: BuiltinBindGroupLayouts,
+    depth: Texture,
     device: Device,
     queue: Queue,
     surface: Surface,
@@ -152,9 +155,15 @@ impl Renderer {
 
         let (device, queue) = Self::create_device_and_queue(&adapter).await?;
         let builtin_bind_group_layouts = BuiltinBindGroupLayouts::new(&device);
+        let depth = Self::create_depth(
+            &device,
+            surface_size.width,
+            surface_size.height,
+        );
 
-        let this = Self {
+        let mut this = Self {
             builtin_bind_group_layouts,
+            depth,
             device,
             queue,
             surface,
@@ -201,11 +210,23 @@ impl Renderer {
         .map_err(|_| Error::NoCompatibleDeviceFound)
     }
 
+    fn create_depth(device: &Device, width: u32, height: u32) -> Texture {
+        device.create_texture(&TextureDescriptor {
+            label: Some("Pylon depth texture"),
+            size: Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+        })
+    }
+
     /// Configures the rendering surface.
     ///
     /// This is automatically called during [`new`](Self::new). It may be called again to resize the
     /// surface or modify the presentation mode.
-    pub fn configure_surface(&self, size: SurfaceSize, present_mode: PresentMode) {
+    pub fn configure_surface(&mut self, size: SurfaceSize, present_mode: PresentMode) {
         self.surface.configure(
             &self.device,
             &SurfaceConfiguration {
@@ -216,6 +237,7 @@ impl Renderer {
                 present_mode,
             },
         );
+        self.depth = Self::create_depth(&self.device, size.width, size.height);
     }
 }
 
@@ -269,7 +291,13 @@ impl Renderer {
                 polygon_mode: PolygonMode::Fill,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Less,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
             multisample: MultisampleState::default(),
             multiview: None,
         })
@@ -347,10 +375,15 @@ impl Renderer {
     ) {
         let frame = self.surface.get_current_texture().unwrap();
         let frame_view = Self::create_frame_view(&frame.texture);
+        let depth_view = Self::create_depth_view(&self.depth);
         let mut encoder = self.create_command_encoder();
 
         {
-            let mut pass = Self::create_render_pass(&mut encoder, &frame_view);
+            let mut pass = Self::create_render_pass(
+                &mut encoder,
+                &frame_view,
+                &depth_view,
+            );
             pass.set_bind_group(
                 0,
                 &camera.transforms_uniform().0.bind_group,
@@ -399,13 +432,33 @@ impl Renderer {
 
     /// Creates a texture view for the current surface frame.
     fn create_frame_view(frame: &Texture) -> TextureView {
-        frame.create_view(&TextureViewDescriptor {
-            label: Some("Pylon frame view"),
+        Self::create_texture_view(
+            frame,
+            "Pylon frame view",
+            TextureAspect::All,
+        )
+    }
+
+    fn create_depth_view(depth: &Texture) -> TextureView {
+        Self::create_texture_view(
+            depth,
+            "Pylon depth view",
+            TextureAspect::DepthOnly,
+        )
+    }
+
+    fn create_texture_view(
+        texture: &Texture,
+        label: &str,
+        aspect: TextureAspect,
+    ) -> TextureView {
+        texture.create_view(&TextureViewDescriptor {
+            label: Some(label),
             // I think we can leave most of these as the defaults and *wgpu* will fill them in for
             // us.
             format: None,
             dimension: None,
-            aspect: TextureAspect::All,
+            aspect,
             base_mip_level: 0,
             mip_level_count: None,
             base_array_layer: 0,
@@ -424,6 +477,7 @@ impl Renderer {
     fn create_render_pass<'a>(
         encoder: &'a mut CommandEncoder,
         frame_view: &'a TextureView,
+        depth_view: &'a TextureView,
     ) -> RenderPass<'a> {
         encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Pylon surface frame render pass"),
@@ -439,7 +493,14 @@ impl Renderer {
                     store: true,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
         })
     }
 }
