@@ -121,7 +121,7 @@ fn main() {
                 // Update cube scale.
                 {
                     *tn.scale_mut() = if mouse_is_down {
-                        0.1
+                        0.5
                     } else {
                         0.05 + ((tick_count / 10_000.0).sin() + 1.0) / 50.0
                     };
@@ -159,7 +159,10 @@ fn main() {
                 // And off our commands go!
                 gfx.queue().submit(Some(command_encoder.finish()));
 
-                gfx.render(&camera, [&cube]);
+                gfx
+                    .create_render()
+                    .add_pass(&camera, [&cube])
+                    .submit();
 
                 tick_count += 1.0;
                 last_fps = fps_counter.tick()
@@ -320,8 +323,8 @@ fn create_cube(
                 @fragment
                 fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                     return vec4<f32>(
-                        position.x / 512.0,
-                        position.y / 1024.0,
+                        0.,
+                        0.,
                         position.z * 2.0,
                         1.0,
                     );
@@ -434,10 +437,6 @@ struct Cube {
 impl pylon_engine::Object for Cube {
     fn triangle_count(&self) -> u32 {
         self.mesh.triangles.len() as u32
-    }
-
-    fn material(&self) -> &Material {
-        &Material
     }
 
     fn render_pipeline(&self) -> &wgpu::RenderPipeline {

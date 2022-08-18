@@ -144,9 +144,6 @@ pub struct MeshTriangle([MeshVertexIndex; 3]);
 unsafe impl bytemuck::Pod for MeshTriangle {}
 unsafe impl bytemuck::Zeroable for MeshTriangle {}
 
-#[derive(Clone, Debug)]
-pub struct Material;
-
 /// The interface to user-managed camera resources.
 pub trait Camera {
     fn transforms_uniform(&self) -> &CameraTransformsUniform;
@@ -155,9 +152,6 @@ pub trait Camera {
 /// The interface to user-managed object resources.
 pub trait Object {
     fn triangle_count(&self) -> u32;
-
-    /// The material applied to the mesh.
-    fn material(&self) -> &Material;
 
     /// The [pipeline](wgpu::RenderPipeline) to be used during rendering of this object.
     ///

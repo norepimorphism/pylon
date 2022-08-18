@@ -252,7 +252,7 @@ impl Renderer {
     /// Creates a render pipeline for [an object](Object).
     pub fn create_pipeline(
         &self,
-        fragment_shader: ShaderSource,
+        fragment_shader: &ShaderModule,
     ) -> RenderPipeline {
         self.device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Pylon pipeline"),
@@ -274,10 +274,7 @@ impl Renderer {
                 }],
             },
             fragment: Some(FragmentState {
-                module: &self.device.create_shader_module(ShaderModuleDescriptor {
-                    label: Some("Pylon fragment shader"),
-                    source: fragment_shader,
-                }),
+                module: fragment_shader,
                 entry_point: "main",
                 targets: &[Some(wgpu::ColorTargetState {
                     // The output of the fragment shader must be compatible with this format.
@@ -367,67 +364,16 @@ impl Renderer {
         }
     }
 
-    /// Rasterizes a 3D scene into a 2D frame and sends it to the rendering surface.
-    pub fn render<'a, C: Camera, O: 'a + Object>(
-        &self,
-        camera: &C,
-        objects: impl IntoIterator<Item = &'a O>,
-    ) {
+    pub fn create_render<'a>(&'a self) -> Render<'a> {
         let frame = self.surface.get_current_texture().unwrap();
-        let frame_view = Self::create_frame_view(&frame.texture);
-        let depth_view = Self::create_depth_view(&self.depth);
-        let mut encoder = self.create_command_encoder();
 
-        {
-            let mut pass = Self::create_render_pass(
-                &mut encoder,
-                &frame_view,
-                &depth_view,
-            );
-            pass.set_bind_group(
-                0,
-                &camera.transforms_uniform().0.bind_group,
-                &[],
-            );
-
-            for object in objects {
-                let triangle_count = object.triangle_count();
-
-                tracing::debug!("Rendering {} triangles...", triangle_count);
-
-                pass.set_pipeline(object.render_pipeline());
-                pass.set_bind_group(
-                    1,
-                    &object.transforms_uniform().0.bind_group,
-                    &[],
-                );
-                for slot in object.bind_group_slots() {
-                    if slot.index < 2 {
-                        panic!("slots 0 and 1 cannot be overwritten");
-                    }
-
-                    pass.set_bind_group(
-                        slot.index,
-                        slot.bind_group,
-                        &[],
-                    );
-                }
-                pass.set_vertex_buffer(
-                    0,
-                    object.vertex_buffer(),
-                );
-                pass.set_index_buffer(
-                    object.index_buffer(),
-                    IndexFormat::Uint32,
-                );
-
-                let index_count = (3 * triangle_count) as u32;
-                pass.draw_indexed(0..index_count, 0, 0..1);
-            }
+        Render {
+            frame_view: Self::create_frame_view(&frame.texture),
+            frame,
+            depth_view: Self::create_depth_view(&self.depth),
+            encoder: self.create_command_encoder(),
+            queue: &self.queue,
         }
-        self.queue.submit(Some(encoder.finish()));
-
-        frame.present();
     }
 
     /// Creates a texture view for the current surface frame.
@@ -472,17 +418,74 @@ impl Renderer {
             label: Some("Pylon command encoder")
         })
     }
+}
 
-    /// Creates the render pass for the current surface frame.
-    fn create_render_pass<'a>(
-        encoder: &'a mut CommandEncoder,
-        frame_view: &'a TextureView,
-        depth_view: &'a TextureView,
-    ) -> RenderPass<'a> {
-        encoder.begin_render_pass(&RenderPassDescriptor {
+pub struct Render<'a> {
+    frame: SurfaceTexture,
+    frame_view: TextureView,
+    depth_view: TextureView,
+    encoder: CommandEncoder,
+    queue: &'a Queue,
+}
+
+impl Render<'_> {
+    pub fn add_pass<'b, O: 'b + Object>(
+        mut self,
+        camera: &impl Camera,
+        objects: impl IntoIterator<Item = &'b O>,
+    ) -> Self {
+        let mut pass = self.create_render_pass();
+        pass.set_bind_group(
+            0,
+            &camera.transforms_uniform().0.bind_group,
+            &[],
+        );
+
+        for object in objects {
+            let triangle_count = object.triangle_count();
+
+            tracing::debug!("Rendering {} triangles...", triangle_count);
+
+            pass.set_pipeline(object.render_pipeline());
+            pass.set_bind_group(
+                1,
+                &object.transforms_uniform().0.bind_group,
+                &[],
+            );
+            for slot in object.bind_group_slots() {
+                if slot.index < 2 {
+                    panic!("slots 0 and 1 cannot be overwritten");
+                }
+
+                pass.set_bind_group(
+                    slot.index,
+                    slot.bind_group,
+                    &[],
+                );
+            }
+            pass.set_vertex_buffer(
+                0,
+                object.vertex_buffer(),
+            );
+            pass.set_index_buffer(
+                object.index_buffer(),
+                IndexFormat::Uint32,
+            );
+
+            let index_count = (3 * triangle_count) as u32;
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+        drop(pass);
+
+        self
+    }
+
+    /// Creates a render pass for the current surface frame.
+    fn create_render_pass<'this>(&'this mut self) -> RenderPass<'this> {
+        self.encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Pylon surface frame render pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: frame_view,
+                view: &self.frame_view,
                 resolve_target: None,
                 ops: Operations {
                     // We can either clear or load here. Clearing wipes the frame with a given color
@@ -494,13 +497,19 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: depth_view,
+                view: &self.depth_view,
                 depth_ops: Some(Operations {
+                    // In clip space, 1.0 is the maximmum depth.
                     load: LoadOp::Clear(1.0),
                     store: true,
                 }),
                 stencil_ops: None,
             }),
         })
+    }
+
+    pub fn submit(self) {
+        self.queue.submit(Some(self.encoder.finish()));
+        self.frame.present();
     }
 }
