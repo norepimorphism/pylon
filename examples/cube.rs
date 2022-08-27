@@ -159,10 +159,9 @@ fn main() {
                 // And off our commands go!
                 gfx.queue().submit(Some(command_encoder.finish()));
 
-                gfx
-                    .create_render()
-                    .add_pass(&camera, [&cube])
-                    .submit();
+                let render = gfx.create_render();
+                render.add_pass().x();
+                render.submit();
 
                 tick_count += 1.0;
                 last_fps = fps_counter.tick()

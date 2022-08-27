@@ -6,13 +6,14 @@ use raw_window_handle::HasRawWindowHandle;
 use wgpu::*;
 
 use crate::{
-    Camera,
     CameraTransformsUniform,
     MeshVertex,
-    Object,
     ObjectTransformsUniform,
     TransformsUniform,
 };
+pub use render::Job;
+
+mod render;
 
 /// The hardcoded texture format for [`Renderer::surface`] and which serves as the output of the
 /// fragment shader.
@@ -364,152 +365,7 @@ impl Renderer {
         }
     }
 
-    pub fn create_render<'a>(&'a self) -> Render<'a> {
-        let frame = self.surface.get_current_texture().unwrap();
-
-        Render {
-            frame_view: Self::create_frame_view(&frame.texture),
-            frame,
-            depth_view: Self::create_depth_view(&self.depth),
-            encoder: self.create_command_encoder(),
-            queue: &self.queue,
-        }
-    }
-
-    /// Creates a texture view for the current surface frame.
-    fn create_frame_view(frame: &Texture) -> TextureView {
-        Self::create_texture_view(
-            frame,
-            "Pylon frame view",
-            TextureAspect::All,
-        )
-    }
-
-    fn create_depth_view(depth: &Texture) -> TextureView {
-        Self::create_texture_view(
-            depth,
-            "Pylon depth view",
-            TextureAspect::DepthOnly,
-        )
-    }
-
-    fn create_texture_view(
-        texture: &Texture,
-        label: &str,
-        aspect: TextureAspect,
-    ) -> TextureView {
-        texture.create_view(&TextureViewDescriptor {
-            label: Some(label),
-            // I think we can leave most of these as the defaults and *wgpu* will fill them in for
-            // us.
-            format: None,
-            dimension: None,
-            aspect,
-            base_mip_level: 0,
-            mip_level_count: None,
-            base_array_layer: 0,
-            array_layer_count: None,
-        })
-    }
-
-    /// Creates a new command encoder for use in [`render`](Self::render).
-    fn create_command_encoder(&self) -> CommandEncoder {
-        self.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("Pylon command encoder")
-        })
-    }
-}
-
-pub struct Render<'a> {
-    frame: SurfaceTexture,
-    frame_view: TextureView,
-    depth_view: TextureView,
-    encoder: CommandEncoder,
-    queue: &'a Queue,
-}
-
-impl Render<'_> {
-    pub fn add_pass<'b, O: 'b + Object>(
-        mut self,
-        camera: &impl Camera,
-        objects: impl IntoIterator<Item = &'b O>,
-    ) -> Self {
-        let mut pass = self.create_render_pass();
-        pass.set_bind_group(
-            0,
-            &camera.transforms_uniform().0.bind_group,
-            &[],
-        );
-
-        for object in objects {
-            let triangle_count = object.triangle_count();
-
-            tracing::debug!("Rendering {} triangles...", triangle_count);
-
-            pass.set_pipeline(object.render_pipeline());
-            pass.set_bind_group(
-                1,
-                &object.transforms_uniform().0.bind_group,
-                &[],
-            );
-            for slot in object.bind_group_slots() {
-                if slot.index < 2 {
-                    panic!("slots 0 and 1 cannot be overwritten");
-                }
-
-                pass.set_bind_group(
-                    slot.index,
-                    slot.bind_group,
-                    &[],
-                );
-            }
-            pass.set_vertex_buffer(
-                0,
-                object.vertex_buffer(),
-            );
-            pass.set_index_buffer(
-                object.index_buffer(),
-                IndexFormat::Uint32,
-            );
-
-            let index_count = (3 * triangle_count) as u32;
-            pass.draw_indexed(0..index_count, 0, 0..1);
-        }
-        drop(pass);
-
-        self
-    }
-
-    /// Creates a render pass for the current surface frame.
-    fn create_render_pass<'this>(&'this mut self) -> RenderPass<'this> {
-        self.encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("Pylon surface frame render pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: &self.frame_view,
-                resolve_target: None,
-                ops: Operations {
-                    // We can either clear or load here. Clearing wipes the frame with a given color
-                    // while loading initializes the frame with the current state of the surface.
-                    load: LoadOp::Load,
-                    // The surface frame contains the final result of the render, so obviously we
-                    // need to write to it.
-                    store: true,
-                },
-            })],
-            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
-                depth_ops: Some(Operations {
-                    // In clip space, 1.0 is the maximmum depth.
-                    load: LoadOp::Clear(1.0),
-                    store: true,
-                }),
-                stencil_ops: None,
-            }),
-        })
-    }
-
-    pub fn submit(self) {
-        self.queue.submit(Some(self.encoder.finish()));
-        self.frame.present();
+    pub fn create_render<'a>(&'a self) -> Job<'a> {
+        Job::new(&self.surface, &self.depth, &self.device, &self.queue)
     }
 }
